@@ -3678,16 +3678,38 @@ function syncSubjectFiltersToCurrent(){
   syncSubjectStrandFilter();
   renderSubjects();
 }
-function closeMobileSidebar(){ document.getElementById("appRoot").classList.remove("sidebar-open"); }
-document.getElementById("sidebarToggleBtn").addEventListener("click", ()=>{
+function closeMobileSidebar(){
   const appRoot = document.getElementById("appRoot");
-  appRoot.classList.toggle("sidebar-open");
+  if(!appRoot) return;
+  appRoot.classList.remove("sidebar-open");
+  const btn = document.getElementById("sidebarToggleBtn");
+  if(btn){
+    btn.title = "Open menu";
+    btn.setAttribute("aria-label", "Open menu");
+  }
+}
+function toggleMobileSidebar(){
+  const appRoot = document.getElementById("appRoot");
+  if(!appRoot) return;
+  const isOpen = appRoot.classList.toggle("sidebar-open");
   appRoot.classList.remove("topbar-hidden");
-});
+  const btn = document.getElementById("sidebarToggleBtn");
+  if(btn){
+    btn.title = isOpen ? "Close menu (Esc)" : "Open menu";
+    btn.setAttribute("aria-label", isOpen ? "Close menu" : "Open menu");
+  }
+}
+document.getElementById("sidebarToggleBtn").addEventListener("click", toggleMobileSidebar);
 document.getElementById("sidebarBackdrop").addEventListener("click", closeMobileSidebar);
 document.getElementById("navlist").addEventListener("click", e=>{
   const btn = e.target.closest("button"); if(!btn) return;
   navigateTo(btn.dataset.page);
+  closeMobileSidebar();
+});
+window.addEventListener("keydown", e=>{
+  if(e.key === "Escape" && document.getElementById("appRoot") && document.getElementById("appRoot").classList.contains("sidebar-open")){
+    closeMobileSidebar();
+  }
 });
 
 let lastScrollY = window.scrollY;
@@ -6849,7 +6871,16 @@ async function handleAuthenticatedUser(fbUser){
     showToast("Signed in, but couldn't reach the user profile database. Some features may not work until this is resolved.", true);
     profile = { name: fbUser.displayName || fbUser.email, email: fbUser.email, role: "pending" };
   }
-  AUTH_SESSION = { id: fbUser.uid, uid: fbUser.uid, name: profile.name, email: profile.email, role: profile.role };
+  const resolvedName = (profile && profile.name) || fbUser.displayName || fbUser.email || "Admin";
+  const resolvedEmail = (profile && profile.email) || fbUser.email || (fbUser.providerData && fbUser.providerData[0] && fbUser.providerData[0].email) || "";
+  AUTH_SESSION = {
+    id: fbUser.uid,
+    uid: fbUser.uid,
+    name: resolvedName,
+    email: resolvedEmail,
+    role: (profile && profile.role) || "pending",
+    tourState: (profile && profile.tourState) || null
+  };
 
   const usesEmailPassword = fbUser.providerData.some(p=>p.providerId==="password");
   if(usesEmailPassword && !fbUser.emailVerified){
@@ -6888,7 +6919,12 @@ async function handleAuthenticatedUser(fbUser){
   const line = document.getElementById("sidebarUserLine");
   if(line) line.innerHTML = `Signed in as <b style="color:#EAF0F6;">${esc(AUTH_SESSION.name || AUTH_SESSION.email)}</b>`;
   await initApp();
-  if(typeof ATLASTour !== "undefined") ATLASTour.maybeOfferOnLogin();
+  if(typeof ATLASTour !== "undefined"){
+    if(profile && profile.tourState){
+      ATLASTour.seedTourState(profile.tourState);
+    }
+    ATLASTour.maybeOfferOnLogin();
+  }
   if(WELCOME_TOAST_MESSAGE){ showToast(WELCOME_TOAST_MESSAGE); WELCOME_TOAST_MESSAGE = null; }
 }
 
@@ -7029,7 +7065,6 @@ document.getElementById("logoutBtn").addEventListener("click", ()=>{
     }else{
       showToast("You are offline. Local data was saved; cloud backup will happen after you reconnect and log in.", true);
     }
-    if(typeof ATLASTour !== "undefined") await ATLASTour.resetDeferredOnLogout();
     await firebase.auth().signOut();
     switchAuthTab("login");
     document.getElementById("loginEmail").value = "";
@@ -7170,10 +7205,10 @@ const TOUR_STEPS = [
   { page:"conflicts", selector:"#conflictTabs", title:"Conflict Filters",
     body:["Use these tabs to switch between all conflicts, unresolved conflicts, Auto-Fix, resolved items, and the complete conflict history.",
           "This keeps active problems separate from resolved records while preserving an audit trail."] },
-  { page:"conflicts", selector:"#changesBody", title:"Auto-Fix Changes",
+  { page:"conflicts", selector:'#conflictTabs button[data-ctab="autofix"]', title:"Auto-Fix Changes",
     body:["After Auto-Fix runs, review this table to see which teacher or schedule assignments changed.",
           "You can inspect the recorded changes and undo the most recent Auto-Fix run when needed."] },
-  { page:"conflicts", selector:"#cmgmtHistoryBody", title:"Conflict History",
+  { page:"conflicts", selector:'#conflictTabs button[data-ctab="history"]', title:"Conflict History",
     body:["Conflict History records when a problem was detected, what schedule entry it affected, and how it was resolved.",
           "Use it when auditing or explaining why a final schedule changed."] },
   { page:"reports", selector:"#reportLoadByArea", title:"Reports",
@@ -7182,7 +7217,7 @@ const TOUR_STEPS = [
   { page:"database", selector:"#syncNowBtn", title:"Database & Sync",
     body:["Database & Sync lets you monitor stored application data, synchronization status, backups, exports, and restore options.",
           "ATLAS stores application data locally and can synchronize supported records with the configured cloud database."] },
-  { page:"settings", selector:"#saveSettings", title:"Admin Settings",
+  { page:"settings", selector:"#page-settings .panel:first-child", title:"Admin Settings",
     body:["Admin Settings controls important school-wide scheduling configuration: school start time, grade-level bell schedules, class periods, breaks, lunch, and the Friday schedule.",
           "Configure these settings carefully — the bell schedule is used when generating class schedules."] },
   { page:"settings", selector:"#saveSchoolName", title:"School Identity",
@@ -7202,43 +7237,160 @@ const ATLASTour = (function(){
   let idx = 0;
   let active = false;
   let resizeHandler = null;
+  let cachedTourState = null;
 
-  function currentEmail(){
-    return (AUTH_SESSION && AUTH_SESSION.email) ? AUTH_SESSION.email.toLowerCase() : null;
+  function currentUserIdentifiers(){
+    const list = [];
+    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
+      if(AUTH_SESSION.uid) list.push(String(AUTH_SESSION.uid).trim());
+      if(AUTH_SESSION.id && AUTH_SESSION.id !== AUTH_SESSION.uid) list.push(String(AUTH_SESSION.id).trim());
+      if(AUTH_SESSION.email) list.push(String(AUTH_SESSION.email).toLowerCase().trim());
+    }
+    const cur = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
+    if(cur){
+      if(cur.uid && !list.includes(cur.uid)) list.push(String(cur.uid).trim());
+      if(cur.email){
+        const em = String(cur.email).toLowerCase().trim();
+        if(!list.includes(em)) list.push(em);
+      }
+    }
+    return list;
+  }
+
+  function seedTourState(stateObj){
+    if(stateObj && typeof stateObj === "object"){
+      cachedTourState = stateObj;
+    }
+  }
+
+  async function syncTourStateToCloud(stateObj){
+    const user = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
+    if(!user || !user.uid || !CLOUD_CONFIG.enabled || !navigator.onLine) return;
+    try{
+      const authHeader = await firestoreAuthHeader();
+      const query = "?updateMask.fieldPaths=tourState" + (CLOUD_CONFIG.anonKey ? "&key="+encodeURIComponent(CLOUD_CONFIG.anonKey) : "");
+      await fetch(firestoreBase()+"/users/"+encodeURIComponent(user.uid)+query, {
+        method: "PATCH",
+        headers: Object.assign({"Content-Type":"application/json"}, authHeader),
+        body: JSON.stringify({ fields: firestoreEncodeFields({ tourState: stateObj }) })
+      });
+    }catch(e){
+      console.warn("ATLASTour: cloud tourState sync failed (local state preserved):", e);
+    }
+  }
+
+  async function resetTourStateInCloud(){
+    const user = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
+    if(!user || !user.uid || !CLOUD_CONFIG.enabled || !navigator.onLine) return;
+    try{
+      const authHeader = await firestoreAuthHeader();
+      const query = "?updateMask.fieldPaths=tourState" + (CLOUD_CONFIG.anonKey ? "&key="+encodeURIComponent(CLOUD_CONFIG.anonKey) : "");
+      await fetch(firestoreBase()+"/users/"+encodeURIComponent(user.uid)+query, {
+        method: "PATCH",
+        headers: Object.assign({"Content-Type":"application/json"}, authHeader),
+        body: JSON.stringify({ fields: { tourState: { nullValue: null } } })
+      });
+    }catch(e){
+      console.warn("ATLASTour: cloud tourState reset failed:", e);
+    }
   }
 
   async function loadTourState(){
-    const email = currentEmail();
-    if(!email) return null;
+    if(cachedTourState) return cachedTourState;
+    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION && AUTH_SESSION.tourState){
+      cachedTourState = AUTH_SESSION.tourState;
+      return cachedTourState;
+    }
+    const ids = currentUserIdentifiers();
+    // 1. Try Store
     try{
       const raw = await Store.get(TOUR_STATE_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      return all[email] || null;
-    }catch(e){ console.error("ATLASTour: could not load tour state:", e); return null; }
+      let all = {};
+      if(raw){
+        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
+      }
+      for(const id of ids){
+        if(all && all[id]){
+          cachedTourState = all[id];
+          return cachedTourState;
+        }
+      }
+      if(all && all["_last"]){
+        cachedTourState = all["_last"];
+        return cachedTourState;
+      }
+    }catch(e){ console.warn("ATLASTour: could not load from Store:", e); }
+
+    // 2. Try direct localStorage
+    try{
+      if(typeof window !== "undefined" && window.localStorage){
+        for(const id of ids){
+          const direct = window.localStorage.getItem("atlas_tour_seen_" + id);
+          if(direct){
+            cachedTourState = { status: direct, updatedAt: new Date().toISOString() };
+            return cachedTourState;
+          }
+        }
+        const stateRaw = window.localStorage.getItem(TOUR_STATE_KEY);
+        if(stateRaw){
+          try{
+            const parsed = JSON.parse(stateRaw);
+            for(const id of ids){
+              if(parsed && parsed[id]){
+                cachedTourState = parsed[id];
+                return cachedTourState;
+              }
+            }
+          }catch(err){}
+        }
+        const deviceSeen = window.localStorage.getItem("atlas_tour_device_seen");
+        if(deviceSeen){
+          cachedTourState = { status: deviceSeen, updatedAt: new Date().toISOString() };
+          return cachedTourState;
+        }
+      }
+    }catch(e){ /* ignore storage restrictions */ }
+
+    return null;
   }
 
   async function saveTourState(status){
-    const email = currentEmail();
-    if(!email) return;
+    const stateObj = { status: status || "dismissed", updatedAt: new Date().toISOString() };
+    cachedTourState = stateObj;
+    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
+      AUTH_SESSION.tourState = stateObj;
+    }
+    const ids = currentUserIdentifiers();
+
+    // 1. Save to Store
     try{
       const raw = await Store.get(TOUR_STATE_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      all[email] = { status, updatedAt: new Date().toISOString() };
+      let all = {};
+      if(raw){
+        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
+      }
+      if(!all || typeof all !== "object") all = {};
+      ids.forEach(id=>{ all[id] = stateObj; });
+      all["_last"] = stateObj;
       await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
-    }catch(e){ console.error("ATLASTour: could not save tour state:", e); }
+    }catch(e){ console.error("ATLASTour: could not save to Store:", e); }
+
+    // 2. Save directly to localStorage for instant synchronous safety
+    try{
+      if(typeof window !== "undefined" && window.localStorage){
+        ids.forEach(id=>{
+          try{ window.localStorage.setItem("atlas_tour_seen_" + id, status || "dismissed"); }catch(err){}
+        });
+        window.localStorage.setItem("atlas_tour_device_seen", status || "dismissed");
+      }
+    }catch(e){}
+
+    // 3. Sync to cloud Firestore user doc
+    syncTourStateToCloud(stateObj);
   }
 
   async function resetDeferredOnLogout(){
-    const email = currentEmail();
-    if(!email) return;
-    try{
-      const raw = await Store.get(TOUR_STATE_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      if(all[email] && all[email].status === "deferred"){
-        delete all[email];
-        await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
-      }
-    }catch(e){ console.error("ATLASTour: could not reset deferred tour state:", e); }
+    // Kept for backward compatibility
   }
 
   function root(){ return document.getElementById("atlasTourRoot"); }
@@ -7394,22 +7546,26 @@ const ATLASTour = (function(){
             <p style="font-size:13.5px;color:var(--ink);margin:0;">You've completed the ATLAS system tour. You can now manage your academic setup, teachers, subjects, sections, teaching loads, class schedules, conflicts, reports, and system settings.</p>
           </div>
           <div class="modal-foot">
-            <button class="btn ghost" id="tourDoneRestartLater">Restart Tour Later</button>
+            <button class="btn ghost" id="tourDoneRestartLater">Restart Tour</button>
             <button class="btn gold" id="tourDoneFinish">Finish Tour</button>
           </div>
         </div>
       </div>`;
     const close = ()=>{ r.innerHTML = ""; };
     document.getElementById("tourDoneFinish").onclick = ()=>{ close(); maybeOfferInstallPrompt(); };
-    document.getElementById("tourDoneRestartLater").onclick = ()=>{ close(); maybeOfferInstallPrompt(); };
+    document.getElementById("tourDoneRestartLater").onclick = ()=>{ close(); restartTour(); };
   }
 
   function showWelcome(){
     const r = root();
+    if(!r) return;
     r.innerHTML = `
       <div class="modal-backdrop" id="tourWelcomeBackdrop">
-        <div class="modal-box narrow">
-          <div class="modal-head"><h3>Welcome to ATLAS</h3></div>
+        <div class="modal-box narrow" role="dialog" aria-modal="true" aria-labelledby="tourWelcomeTitle">
+          <div class="modal-head">
+            <h3 id="tourWelcomeTitle">Welcome to ATLAS</h3>
+            <button class="modal-close" id="tourWelcomeClose" aria-label="Close">&times;</button>
+          </div>
           <div class="modal-body">
             <div class="hint" style="margin-top:-8px;">Teaching Loads &amp; Class Schedules</div>
             <p style="font-size:13.5px;color:var(--ink);margin:0;">Welcome to ATLAS. This quick tour will guide you through the main features of the system and show you how they work together to manage teachers, subjects, sections, teaching loads, schedules, conflicts, and reports.</p>
@@ -7423,39 +7579,132 @@ const ATLASTour = (function(){
           </div>
         </div>
       </div>`;
-    document.getElementById("tourWelcomeStart").onclick = ()=>{ r.innerHTML=""; startTour(); };
-    document.getElementById("tourWelcomeSkip").onclick = ()=>{ r.innerHTML=""; saveTourState("skipped"); maybeOfferInstallPrompt(); };
-    document.getElementById("tourWelcomeLater").onclick = ()=>{ r.innerHTML=""; saveTourState("deferred"); };
+
+    let closed = false;
+    const dismiss = (status)=>{
+      if(closed) return;
+      closed = true;
+      document.removeEventListener("keydown", handleWelcomeKeydown);
+      r.innerHTML = "";
+      saveTourState(status || "dismissed");
+    };
+
+    const handleWelcomeKeydown = (e)=>{
+      if(e.key === "Escape"){
+        e.preventDefault();
+        dismiss("dismissed");
+      }
+    };
+    document.addEventListener("keydown", handleWelcomeKeydown);
+
+    const backdrop = document.getElementById("tourWelcomeBackdrop");
+    if(backdrop){
+      backdrop.addEventListener("click", (e)=>{
+        if(e.target === backdrop) dismiss("dismissed");
+      });
+    }
+
+    const closeBtn = document.getElementById("tourWelcomeClose");
+    if(closeBtn) closeBtn.onclick = ()=> dismiss("dismissed");
+
+    const laterBtn = document.getElementById("tourWelcomeLater");
+    if(laterBtn) laterBtn.onclick = ()=> dismiss("dismissed");
+
+    const skipBtn = document.getElementById("tourWelcomeSkip");
+    if(skipBtn) skipBtn.onclick = ()=>{
+      dismiss("skipped");
+      maybeOfferInstallPrompt();
+    };
+
+    const startBtn = document.getElementById("tourWelcomeStart");
+    if(startBtn) startBtn.onclick = ()=>{
+      if(closed) return;
+      closed = true;
+      document.removeEventListener("keydown", handleWelcomeKeydown);
+      r.innerHTML = "";
+      saveTourState("started");
+      startTour();
+    };
   }
 
   function startTour(){
     active = true;
+    idx = 0;
     closeTourDrawer();
     document.addEventListener("keydown", onKeydown);
     showStep(0);
   }
 
-  function restartTour(){
-    const r = root();
-    if(r) r.innerHTML = "";
+  async function restartTour(){
+    teardown();
+    idx = 0;
+    await saveTourState("started");
     startTour();
+  }
+
+  async function resetTourState(){
+    cachedTourState = null;
+    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
+      delete AUTH_SESSION.tourState;
+    }
+    const ids = currentUserIdentifiers();
+    try{
+      const raw = await Store.get(TOUR_STATE_KEY);
+      let all = {};
+      if(raw){
+        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
+      }
+      if(all && typeof all === "object"){
+        ids.forEach(id=>{ delete all[id]; });
+        delete all["_last"];
+        await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
+      }
+    }catch(e){ console.error("ATLASTour: could not reset Store:", e); }
+
+    try{
+      if(typeof window !== "undefined" && window.localStorage){
+        ids.forEach(id=>{
+          try{ window.localStorage.removeItem("atlas_tour_seen_" + id); }catch(err){}
+        });
+        window.localStorage.removeItem("atlas_tour_device_seen");
+      }
+    }catch(e){}
+
+    resetTourStateInCloud();
+    showToast("Tour reset. The 'Welcome to ATLAS' prompt will appear on your next login.");
   }
 
   async function maybeOfferOnLogin(){
     const state = await loadTourState();
-    if(!state || (state.status !== "completed" && state.status !== "skipped" && state.status !== "deferred")) showWelcome();
-    else maybeOfferInstallPrompt();
+    // Show the welcome popup ONLY on a user's very first login (no saved tour state).
+    // Any prior interaction (Skip, Maybe Later, Start, Finish) sets a state that
+    // prevents the auto-popup from ever appearing again on subsequent logins.
+    // Manual replay is always available via the Admin Settings -> Guided Tour button.
+    if(!state) showWelcome();
+    else maybeShowInstallPrompt();
   }
 
-  async function maybeOfferInstallPrompt(){
+  async function maybeShowInstallPrompt(){
     const state = await loadTourState();
-    if(state && (state.status === "completed" || state.status === "skipped")) window.maybeOfferInstallPrompt();
+    if(!state) return;
+    // Only show install prompt after tour has been completed; respect skipped/dismissed/no-state
+    if(state.status === "completed"){
+      // Delegate to the app's existing PWA install prompt handler
+      if(typeof window.maybeOfferInstallPrompt === "function") window.maybeOfferInstallPrompt();
+    }
   }
 
-  return { startTour, nextStep, previousStep, skipTour, finishTour, restartTour, showStep, saveTourState, loadTourState, maybeOfferOnLogin, maybeOfferInstallPrompt, resetDeferredOnLogout };
+  return { startTour, nextStep, previousStep, skipTour, finishTour, restartTour, resetTourState, showStep, saveTourState, loadTourState, seedTourState, maybeOfferOnLogin, maybeShowInstallPrompt, resetDeferredOnLogout };
 })();
 
-document.getElementById("startGuidedTourBtn").addEventListener("click", ()=> ATLASTour.restartTour());
+const startGuidedTourBtn = document.getElementById("startGuidedTourBtn");
+if(startGuidedTourBtn) startGuidedTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
+const resetGuidedTourBtn = document.getElementById("resetGuidedTourBtn");
+if(resetGuidedTourBtn) resetGuidedTourBtn.addEventListener("click", ()=> ATLASTour.resetTourState());
+const topbarTourBtn = document.getElementById("topbarTourBtn");
+if(topbarTourBtn) topbarTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
+const sidebarTourBtn = document.getElementById("sidebarTourBtn");
+if(sidebarTourBtn) sidebarTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
 document.getElementById("installAppBtn").addEventListener("click", requestAtlasInstall);
 updateInstallButton();
 
