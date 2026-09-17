@@ -7782,3 +7782,4 @@ if("serviceWorker" in navigator && (location.protocol === "https:" || location.h
 // (registered up in the AUTHENTICATION section) fires once immediately with
 // whatever session Firebase already has persisted, and handles showing
 // either the app or the login screen from there.
+
