@@ -1052,7 +1052,7 @@ function setSaveIndicator(state){
 function snapshotData(){
   return {
     teachersAll: TEACHERS_ALL,
-    sectionsAll: SECTIONS_ALL.map(s=>({id:s.id, grade:s.grade, name:s.name, strand:s.strand, adviserId:s.adviserId, roomId:s.roomId, sectionType:s.sectionType, classShift:s.classShift, createdBy:s.createdBy})),
+    sectionsAll: SECTIONS_ALL.map(s=>({id:s.id, grade:s.grade, name:s.name, strand:s.strand, roomId:s.roomId, sectionType:s.sectionType, classShift:s.classShift, createdBy:s.createdBy})),
     currentTerm: CURRENT_TERM,
     gradeConfig: GRADE_CONFIG,
     adminStart: ADMIN_START,
@@ -1065,6 +1065,8 @@ function snapshotData(){
     scheduleAssignments: SCHEDULE_ASSIGNMENTS,
     scheduleConflicts: SCHEDULE_CONFLICTS,
     scheduleGeneratedAt: SCHEDULE_GENERATED_AT,
+    finalScheduleValidatedAt: FINAL_SCHEDULE_VALIDATED_AT,
+    finalScheduleValidatedBy: FINAL_SCHEDULE_VALIDATED_BY,
     resolvedConflicts: RESOLVED_CONFLICTS,
     conflictHistory: CONFLICT_HISTORY,
     conflictHistoryIdCounter,
@@ -1088,8 +1090,6 @@ function snapshotData(){
     finalAuditIdCounter,
     finalScheduleFinalizedAt: FINAL_SCHEDULE_FINALIZED_AT,
     finalScheduleFinalizedBy: FINAL_SCHEDULE_FINALIZED_BY,
-    finalScheduleValidatedAt: FINAL_SCHEDULE_VALIDATED_AT,
-    finalScheduleValidatedBy: FINAL_SCHEDULE_VALIDATED_BY,
     specialProgramSubjects: SPECIAL_PROGRAM_SUBJECTS,
     scheduleDataVersion: 2
   };
@@ -1252,8 +1252,6 @@ function applySnapshot(data){
   finalAuditIdCounter = data.finalAuditIdCounter || (FINAL_SCHEDULE_AUDIT_LOG.length+1);
   FINAL_SCHEDULE_FINALIZED_AT = data.finalScheduleFinalizedAt || null;
   FINAL_SCHEDULE_FINALIZED_BY = data.finalScheduleFinalizedBy || null;
-  FINAL_SCHEDULE_VALIDATED_AT = data.finalScheduleValidatedAt || null;
-  FINAL_SCHEDULE_VALIDATED_BY = data.finalScheduleValidatedBy || null;
   SPECIAL_PROGRAM_SUBJECTS = (Array.isArray(data.specialProgramSubjects) && data.specialProgramSubjects.length)
     ? data.specialProgramSubjects
     : ["ICT", "RFS", "Research"];
@@ -1288,6 +1286,8 @@ function applySnapshot(data){
   }
   SCHEDULE_CONFLICTS = data.scheduleConflicts || [];
   SCHEDULE_GENERATED_AT = data.scheduleGeneratedAt || null;
+  FINAL_SCHEDULE_VALIDATED_AT = data.finalScheduleValidatedAt || null;
+  FINAL_SCHEDULE_VALIDATED_BY = data.finalScheduleValidatedBy || null;
   RESOLVED_CONFLICTS = data.resolvedConflicts || [];
   CONFLICT_HISTORY = data.conflictHistory || [];
   conflictHistoryIdCounter = data.conflictHistoryIdCounter || (CONFLICT_HISTORY.length+1);
@@ -2534,6 +2534,15 @@ function openTermPicker(onConfirm){
 }
 
 function runGenerateSchedule(){
+  const missingSections = SECTIONS.length===0;
+  const missingSubjects = SUBJECTS.length===0;
+  if(missingSections || missingSubjects){
+    const missing = missingSections && missingSubjects
+      ? "Sections and Subjects"
+      : missingSections ? "Sections" : "Subjects";
+    openConfirm(`<b>Missing Scheduling Data</b><br><br>Please create at least one ${missing} before using Auto-Generate Schedule.`, ()=>{}, "Close");
+    return;
+  }
   openConfirm("Regenerating the schedule may replace existing auto-generated assignments for the grade levels and days you select next. Your manually-added or manually-edited entries are protected and will not be overwritten. Do you want to continue?", ()=>{
     openTermPicker(async ({ term, grades, dayMode })=>{
       const { assignmentMap, conflicts } = generateSchedule({ term, grades, dayMode });
@@ -2543,6 +2552,7 @@ function runGenerateSchedule(){
       if(resultWrap){ resultWrap.style.display = "none"; resultWrap.innerHTML = ""; }
       await saveData();
       renderAll();
+      navigateTo("schedule");
       const total = Object.keys(assignmentMap).length;
       const scopeLabel = grades ? `${grades.length===1?grades[0]:grades.length+" selected grade levels"}` : "all grade levels";
       const msg = conflicts.length
@@ -3403,8 +3413,6 @@ function openTeacherForm(existingId){
       selectedTeacher = id;
       teacherRecord = t;
     }
-    FINAL_SCHEDULE_VALIDATED_AT = null;
-    FINAL_SCHEDULE_VALIDATED_BY = null;
     closeModal();
     await saveData();
     await persistEntityChange("teachers", teacherRecord, isEdit ? "UPDATE" : "CREATE");
@@ -3427,8 +3435,6 @@ function deleteTeacher(id){
     Object.keys(SCHEDULE_ASSIGNMENTS).forEach(k=>{
       if(SCHEDULE_ASSIGNMENTS[k]===id) delete SCHEDULE_ASSIGNMENTS[k];
     });
-    FINAL_SCHEDULE_VALIDATED_AT = null;
-    FINAL_SCHEDULE_VALIDATED_BY = null;
     await saveData();
     await persistEntityChange("teachers", {id}, "DELETE");
     renderAll();
@@ -3452,13 +3458,6 @@ function openSectionForm(existingId){
           </label>
           <label class="field">Section Name
             <input type="text" id="sName" value="${isEdit?esc(existing.name):''}" placeholder="e.g. Narra">
-          </label>
-          <label class="field">Adviser
-            <select id="sAdviser">
-              <option value="">— Unassigned —</option>
-              ${TEACHERS.map(t=>`<option value="${t.id}" ${isEdit&&existing.adviserId===t.id?'selected':''}>${esc(t.name)}</option>`).join("")}
-            </select>
-            ${TEACHERS.length ? '' : '<span class="hint">Add a teacher to your faculty roster first.</span>'}
           </label>
           <label class="field" id="sStrandField" style="display:none;">Track (Sr. High only)
             <select id="sStrand">
@@ -3484,6 +3483,12 @@ function openSectionForm(existingId){
           <div id="sRoomNewFields" style="display:none; background:#F7F4E9; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:-4px;">
             <label class="field">New room name
               <input type="text" id="nrName" placeholder="e.g. Room 204">
+            </label>
+            <label class="field" style="margin-top:8px;">Type
+              <input type="text" id="nrType" placeholder="e.g. Classroom, Science Lab, Gym">
+            </label>
+            <label class="field" style="margin-top:8px;">Capacity
+              <input type="number" min="1" id="nrCapacity">
             </label>
             <div class="err-text" id="nrErr"></div>
             <button type="button" class="btn gold" id="nrSaveBtn" style="margin-top:4px;">Save Room</button>
@@ -3513,14 +3518,16 @@ function openSectionForm(existingId){
   });
   document.getElementById("nrSaveBtn").onclick = async ()=>{
     const name = document.getElementById("nrName").value.trim();
+    const type = document.getElementById("nrType").value.trim();
+    const capacity = Number(document.getElementById("nrCapacity").value)||null;
     if(!name){ document.getElementById("nrErr").textContent = "Please enter a room name."; return; }
     if(ROOMS.some(r=>r.name.toLowerCase()===name.toLowerCase())){ document.getElementById("nrErr").textContent = "A room with this name already exists."; return; }
-    const room = { id:"RM"+(roomCounter++), name };
+    const room = { id:"RM"+(roomCounter++), name, type, capacity };
     ROOMS.push(room);
     await saveData();
     const opt = document.createElement("option");
     opt.value = room.id;
-    opt.textContent = room.name;
+    opt.textContent = room.name + (room.type ? " — "+room.type : "");
     roomSelect.insertBefore(opt, roomSelect.querySelector('option[value="__new__"]'));
     roomSelect.value = room.id;
     lastRoomValue = room.id;
@@ -3534,7 +3541,6 @@ function openSectionForm(existingId){
   document.getElementById("sSave").onclick = ()=> withButtonLoading(document.getElementById("sSave"), async ()=>{
     const grade = document.getElementById("sGrade").value;
     const name = document.getElementById("sName").value.trim();
-    const adviserId = document.getElementById("sAdviser").value || undefined;
     const strandRaw = document.getElementById("sStrand") ? document.getElementById("sStrand").value : "";
     const strand = (grade==="Grade 11"||grade==="Grade 12") && strandRaw ? strandRaw : undefined;
     const isShs = (grade==="Grade 11"||grade==="Grade 12");
@@ -3550,7 +3556,6 @@ function openSectionForm(existingId){
     if(isEdit){
       existing.grade = grade; existing.name = name;
       if(strand) existing.strand = strand; else delete existing.strand;
-      if(adviserId) existing.adviserId = adviserId; else delete existing.adviserId;
       if(roomId) existing.roomId = roomId; else delete existing.roomId;
       existing.sectionType = sectionType; existing.classShift = classShift;
       sectionRecord = existing;
@@ -3558,14 +3563,11 @@ function openSectionForm(existingId){
       const id = makeId(); // stable UUID — safe to create the same section offline on two devices without ID collisions
       const sec = { id, grade, name, tier:tierOf(grade), subTier:subTierOf(grade), sectionType, classShift, createdBy: currentAdminId() };
       if(strand) sec.strand = strand;
-      if(adviserId) sec.adviserId = adviserId;
       if(roomId) sec.roomId = roomId;
       SECTIONS_ALL.push(sec);
       refreshOwnedViews();
       sectionRecord = sec;
     }
-    FINAL_SCHEDULE_VALIDATED_AT = null;
-    FINAL_SCHEDULE_VALIDATED_BY = null;
     recomputeSectionIdx();
     closeModal();
     await saveData();
@@ -3590,8 +3592,7 @@ function openSectionViewModal(id){
           ${row("Grade Level", esc(s.grade))}
           ${row("Section Name", `<b>${esc(s.name)}</b>`)}
           ${row("Track/Strand", s.strand ? `<span class="tag maroon">${esc(s.strand)}</span>` : '<span class="hint">—</span>')}
-          ${row("Adviser", s.adviserId && teacherById(s.adviserId) ? esc(teacherById(s.adviserId).name) : '<span class="hint">Unassigned</span>')}
-          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>` : '<span class="hint">Unassigned</span>')}
+          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>${room.type?` — ${esc(room.type)}`:""}` : '<span class="hint">Unassigned</span>')}
           ${row("Subjects Assigned", subs.length ? subs.map(sub=>esc(sub.name)).join(", ") : '<span class="hint">None yet</span>')}
         </div>
         <div class="modal-foot">
@@ -3622,8 +3623,7 @@ function openSectionViewModal(id){
           ${row("Track/Strand", s.strand ? `<span class="tag maroon">${esc(s.strand)}</span>` : '<span class="hint">—</span>')}
           ${row("Section Type", `<span class="tag ${s.sectionType==='Special Program'?'maroon':'gold'}">${esc(s.sectionType||'Regular')}</span>`)}
           ${isSHSGrade(s.grade) ? row("Class Shift", s.classShift && s.classShift!=='None' ? `<span class="tag gold">${esc(s.classShift)} Class</span>` : '<span class="hint">None</span>') : ''}
-          ${row("Adviser", s.adviserId && teacherById(s.adviserId) ? esc(teacherById(s.adviserId).name) : '<span class="hint">Unassigned</span>')}
-          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>` : '<span class="hint">Unassigned</span>')}
+          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>${room.type?' — '+esc(room.type):''}` : '<span class="hint">Unassigned</span>')}
           ${row("Subjects Assigned", subs.length)}
           <div style="font-size:12px;color:var(--ink-soft);font-weight:700;margin:12px 0 6px;">Assigned Subjects</div>
           ${subs.length ? `<ul style="margin:0;padding-left:18px;font-size:13px;">${subs.map(sub=>`<li>${esc(sub.name)} (${esc(sub.code)})</li>`).join("")}</ul>` : `<div class="hint">No subjects assigned for this section yet.</div>`}
@@ -3647,8 +3647,6 @@ function deleteSection(id){
     const idx = SECTIONS_ALL.findIndex(x=>x.id===id);
     if(idx>-1) SECTIONS_ALL.splice(idx,1);
     refreshOwnedViews();
-    FINAL_SCHEDULE_VALIDATED_AT = null;
-    FINAL_SCHEDULE_VALIDATED_BY = null;
     await saveData();
     await persistEntityChange("sections", {id}, "DELETE");
     renderAll();
@@ -3700,38 +3698,16 @@ function syncSubjectFiltersToCurrent(){
   syncSubjectStrandFilter();
   renderSubjects();
 }
-function closeMobileSidebar(){
+function closeMobileSidebar(){ document.getElementById("appRoot").classList.remove("sidebar-open"); }
+document.getElementById("sidebarToggleBtn").addEventListener("click", ()=>{
   const appRoot = document.getElementById("appRoot");
-  if(!appRoot) return;
-  appRoot.classList.remove("sidebar-open");
-  const btn = document.getElementById("sidebarToggleBtn");
-  if(btn){
-    btn.title = "Open menu";
-    btn.setAttribute("aria-label", "Open menu");
-  }
-}
-function toggleMobileSidebar(){
-  const appRoot = document.getElementById("appRoot");
-  if(!appRoot) return;
-  const isOpen = appRoot.classList.toggle("sidebar-open");
+  appRoot.classList.toggle("sidebar-open");
   appRoot.classList.remove("topbar-hidden");
-  const btn = document.getElementById("sidebarToggleBtn");
-  if(btn){
-    btn.title = isOpen ? "Close menu (Esc)" : "Open menu";
-    btn.setAttribute("aria-label", isOpen ? "Close menu" : "Open menu");
-  }
-}
-document.getElementById("sidebarToggleBtn").addEventListener("click", toggleMobileSidebar);
+});
 document.getElementById("sidebarBackdrop").addEventListener("click", closeMobileSidebar);
 document.getElementById("navlist").addEventListener("click", e=>{
   const btn = e.target.closest("button"); if(!btn) return;
   navigateTo(btn.dataset.page);
-  closeMobileSidebar();
-});
-window.addEventListener("keydown", e=>{
-  if(e.key === "Escape" && document.getElementById("appRoot") && document.getElementById("appRoot").classList.contains("sidebar-open")){
-    closeMobileSidebar();
-  }
 });
 
 let lastScrollY = window.scrollY;
@@ -5036,15 +5012,17 @@ function renderSections(){
   const tbody = document.querySelector("#sectionsTable tbody");
   tbody.innerHTML = visible.length ? visible.map(s=>{
     const cfg = GRADE_CONFIG[s.grade];
-    const adviser = s.adviserId ? teacherById(s.adviserId) : null;
+    const coordination = s.strand ? s.strand+" Track (Subject Teachers — see Schedule)" : "Subject Teachers (see Schedule)";
     const room = s.roomId ? ROOMS.find(r=>r.id===s.roomId) : null;
-    const roomCell = room ? `<b>${esc(room.name)}</b>` : `<span class="hint">Unassigned</span>`;
+    const roomCell = room ? `<b>${esc(room.name)}</b>${room.type?`<div class="hint">${esc(room.type)}</div>`:""}` : `<span class="hint">Unassigned</span>`;
     return `<tr>
       <td class="check-cell"><input type="checkbox" class="row-check" data-id="${s.id}"></td>
       <td>${s.grade}</td>
       <td>${s.name}${s.strand?` <span class="tag maroon">${s.strand}</span>`:""}${s.sectionType==='Special Program'?' <span class="tag maroon">Special Program</span>':''}${s.classShift&&s.classShift!=='None'?` <span class="tag gold">${s.classShift} Class</span>`:''}${syncBadgeHtml("sections", s.id)}</td>
-      <td>${adviser ? esc(adviser.name) : '<span class="hint">Unassigned</span>'}</td>
+      <td><span class="tag gold">Subject-based</span></td>
+      <td>${coordination}</td>
       <td>${roomCell}</td>
+      <td>${subjectsForSection(s).length}</td>
       <td>${cfg.periods}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="View section details" data-view-section="${s.id}">👁️ View</button>
@@ -5052,7 +5030,7 @@ function renderSections(){
         <button class="icon-btn danger" title="Permanently delete" data-delete-section="${s.id}">🗑️ Delete</button>
       </div></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="7" class="empty">No sections for ${SECTION_GRADE_FILTER==="All"?"the school":SECTION_GRADE_FILTER} yet.</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty">No sections for ${SECTION_GRADE_FILTER==="All"?"the school":SECTION_GRADE_FILTER} yet.</td></tr>`;
   tbody.querySelectorAll("[data-view-section]").forEach(b=>{ b.onclick = ()=>openSectionViewModal(b.dataset.viewSection); });
   tbody.querySelectorAll("[data-edit-section]").forEach(b=>{ b.onclick = ()=>openSectionForm(b.dataset.editSection); });
   tbody.querySelectorAll("[data-delete-section]").forEach(b=>{ b.onclick = ()=>deleteSection(b.dataset.deleteSection); });
@@ -5825,14 +5803,9 @@ function buildConsolidatedScheduleHTML(forPrint){
 function renderFinalScheduleResults(){
   const f = collectFinalScheduleFilters();
   const warnEl = document.getElementById("fsTermWarning");
-  const printBtn = document.getElementById("fsPrintAllBtn");
-  const excelBtn = document.getElementById("fsDownloadExcelBtn");
-  const isValidated = !!FINAL_SCHEDULE_VALIDATED_AT;
-  if(printBtn) printBtn.disabled = !isValidated;
-  if(excelBtn) excelBtn.disabled = !isValidated;
-  if(!isValidated){
+  if(!FINAL_SCHEDULE_VALIDATED_AT){
     warnEl.style.display = "block";
-    warnEl.textContent = "The schedule is hidden until an Admin generates it and successfully clicks Validate Schedule on the Class Schedule page.";
+    warnEl.textContent = "Final Schedule is not available yet. Generate a schedule in Class Schedule, review it, then click Validate Schedule.";
     document.getElementById("fsResults").innerHTML = "";
     return;
   }
@@ -5902,7 +5875,7 @@ function applyPrintOrientation(){
 // Prints the ENTIRE matching weekly schedule as one continuous document —
 // a single table with a repeating header, never separate printouts per day.
 function printAllFinalSchedules(){
-  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the generated schedule before printing the Final Classroom Schedule.", true); return; }
+  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the schedule before printing Final Classroom Schedule.", true); return; }
   const f = collectFinalScheduleFilters();
   if(finalScheduleOutOfContext(f)){ showToast("Switch to the current School Year/Term to print its schedule.", true); return; }
   const html = buildConsolidatedScheduleHTML(true);
@@ -5918,7 +5891,7 @@ function printAllFinalSchedules(){
 // active filter (Grade Level, Section, Day, Teacher, Room/Building), using
 // the exact same row data as the on-screen consolidated document.
 function downloadFinalScheduleExcel(){
-  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the generated schedule before downloading the Final Classroom Schedule.", true); return; }
+  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the schedule before downloading Final Classroom Schedule.", true); return; }
   const f = collectFinalScheduleFilters();
   if(finalScheduleOutOfContext(f)){ showToast("Switch to the current School Year/Term to download its schedule.", true); return; }
   const sy = schoolYearById(CURRENT_SCHOOL_YEAR_ID);
@@ -6386,14 +6359,14 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
   const splitList = v => (v||"").toString().split(/[;,]/).map(s=>s.trim()).filter(Boolean);
   openBulkImportModal({
     title: "Import Teacher Loads from Excel/CSV",
-    hint: "One row per Teacher + Grade Level. Required columns: Teacher Name, Role/Position, Grade Level, Regular Class Loads, Special Program Loads. Optional Class Shift accepts AM Class, PM Class, or None for Grade 11/12. Special Program Subject is required whenever Special Program Loads is greater than 0. A teacher who teaches more than one grade level should have one row per grade.",
+    hint: "One row per Teacher + Grade Level. Required columns: Teacher Name, Role/Position, Grade Level, Regular Class Loads, Special Program Loads (whole numbers, 0 or greater — Special Program Loads = 0 is normal and won't produce an error). Special Program Subject is required whenever Special Program Loads is greater than 0 (any new subject name is added to the Special Program Subject list automatically). Optional: Employee/Teacher ID, Employment Status, Specialization. A teacher who teaches more than one grade level should have one row per grade; Total Loads is always calculated as Regular + Special, never a column you fill in.",
     fileInputId: "teacherImportFile",
     templateFilename: "atlas-teacher-loads-template.csv",
-    templateHeaders: ["Teacher Name","Role/Position","Employee/Teacher ID","Grade Level","Regular Class Loads","Special Program Loads","Special Program Subject","Class Shift","Employment Status","Specialization"],
+    templateHeaders: ["Teacher Name","Role/Position","Employee/Teacher ID","Grade Level","Regular Class Loads","Special Program Loads","Special Program Subject","Employment Status","Specialization"],
     templateSample: [
-      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 7","5","2","ICT","None","Full-time","Math"],
-      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 8","4","2","Research","None","Full-time","Math"],
-      ["Maria Santos","SHS Science Teacher","T-2026-021","Grade 11","6","0","","AM Class","Part-time","Science"]
+      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 7","5","2","ICT","Full-time","Math"],
+      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 8","4","2","Research","Full-time","Math"],
+      ["Maria Santos","SHS Science Teacher","T-2026-021","Grade 11","6","0","","Part-time","Science"]
     ],
     requiredColumns: [
       {label:"Teacher Name", keys:["teacher name","full name","name"]},
@@ -6402,7 +6375,7 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       {label:"Regular Class Loads", keys:["regular class loads","regular load(s)","regular loads","regular"]},
       {label:"Special Program Loads", keys:["special program loads","special program load(s)","special"]}
     ],
-    previewColumns: ["Teacher","Grade Level","Regular Loads","Special Program Loads","Special Program Subject","Class Shift","Total"],
+    previewColumns: ["Teacher","Grade Level","Regular Loads","Special Program Loads","Special Program Subject","Total"],
     entityLabel: "teacher(s)",
     errorRowCells: row => [
       row["teacher name"]||row["full name"]||row["name"]||"",
@@ -6410,7 +6383,6 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       row["regular class loads"]!==undefined?row["regular class loads"]:(row["regular"]||""),
       row["special program loads"]!==undefined?row["special program loads"]:(row["special"]||""),
       row["special program subject"]||"",
-      row["class shift"]||row["shift"]||"",
       ""
     ],
     parseRow(row){
@@ -6421,7 +6393,6 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const regRaw = row["regular class loads"]!==undefined ? row["regular class loads"] : (row["regular load(s)"]!==undefined?row["regular load(s)"]:(row["regular loads"]!==undefined?row["regular loads"]:row["regular"]));
       const specRaw = row["special program loads"]!==undefined ? row["special program loads"] : (row["special program load(s)"]!==undefined?row["special program load(s)"]:row["special"]);
       const specialSubject = (row["special program subject"]||row["special program subject(s)"]||"").toString().trim();
-      const shiftRaw = (row["class shift"]||row["shift"]||"None").toString().trim();
 
       if(!name) return {ok:false, error:"Missing Teacher Name."};
       if(!role) return {ok:false, error:"Missing Role/Position."};
@@ -6433,16 +6404,14 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const regular = Number(regRaw), special = Number(specRaw);
       if(regular+special < 1) return {ok:false, error:`Regular Class Loads + Special Program Loads must total at least 1 for ${grade}.`};
       if(special>0 && !specialSubject) return {ok:false, error:`Special Program Subject is required for ${grade} since Special Program Loads is greater than 0.`};
-      const shift = /^(am|am class)$/i.test(shiftRaw) ? "AM" : /^(pm|pm class)$/i.test(shiftRaw) ? "PM" : /^(none|--none--|none class)$/i.test(shiftRaw) ? "None" : null;
-      if(shift===null) return {ok:false, error:`Class Shift must be AM Class, PM Class, or None (got "${shiftRaw}").`};
 
       let status = (row["employment status"]||row["status"]||"Full-time").toString().trim();
       status = /^part-?time$/i.test(status) ? "Part-time" : "Full-time";
       const specializations = splitList(row["specialization"]||row["specializations"]||row["learning area"]);
       return {
         ok:true,
-        record: { name, role, employeeId, status, specializations, grade, regular, special, specialSubject: special>0?specialSubject:"", shift },
-        display: [name+(employeeId?` (${employeeId})`:""), grade, regular, special, special>0?specialSubject:"—", shift+" Class", regular+special]
+        record: { name, role, employeeId, status, specializations, grade, regular, special, specialSubject: special>0?specialSubject:"" },
+        display: [name+(employeeId?` (${employeeId})`:""), grade, regular, special, special>0?specialSubject:"—", regular+special]
       };
     },
     // Groups the per-(teacher,grade) rows above into one entry per distinct
@@ -6454,9 +6423,8 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const groups = new Map();
       rawValid.forEach(r=>{
         const key = r.employeeId ? "id::"+r.employeeId.toLowerCase() : "name::"+r.name.toLowerCase()+"::"+r.role.toLowerCase();
-        if(!groups.has(key)) groups.set(key, { name:r.name, role:r.role, employeeId:r.employeeId, status:r.status, specializations:r.specializations, gradeLoads:{}, gradeShifts:{} });
+        if(!groups.has(key)) groups.set(key, { name:r.name, role:r.role, employeeId:r.employeeId, status:r.status, specializations:r.specializations, gradeLoads:{} });
         groups.get(key).gradeLoads[r.grade] = { regular:r.regular, special:r.special, specialSubject:r.specialSubject }; // last row for a repeated grade wins
-        groups.get(key).gradeShifts[r.grade] = r.shift;
       });
       const entries = [];
       groups.forEach(g=>{
@@ -6464,10 +6432,10 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
           ? TEACHERS.find(t=> (t.employeeId||"").toLowerCase()===g.employeeId.toLowerCase())
           : TEACHERS.find(t=> t.name.toLowerCase()===g.name.toLowerCase() && t.role.toLowerCase()===g.role.toLowerCase());
         if(existing){
-          entries.push({ isNew:false, existingId: existing.id, mergedGradeLoads: g.gradeLoads, mergedGradeShifts: g.gradeShifts });
+          entries.push({ isNew:false, existingId: existing.id, mergedGradeLoads: g.gradeLoads });
         } else {
           const tiers = GRADE_ORDER.filter(gr=>gradeLoadTotal(g.gradeLoads[gr])>0);
-          entries.push({ isNew:true, record: { id: makeId(), name:g.name, role:g.role, employeeId:g.employeeId||"", tiers, gradeLoads:g.gradeLoads, gradeShifts:g.gradeShifts, status:g.status, specializations:g.specializations, subjectsCanTeach:[], maxTeachingHours:null, createdBy: currentAdminId() } });
+          entries.push({ isNew:true, record: { id: makeId(), name:g.name, role:g.role, employeeId:g.employeeId||"", tiers, gradeLoads:g.gradeLoads, gradeShifts:{}, status:g.status, specializations:g.specializations, subjectsCanTeach:[], maxTeachingHours:null, createdBy: currentAdminId() } });
         }
       });
       return entries;
@@ -6485,8 +6453,6 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
         if(!t) return;
         t.gradeLoads = t.gradeLoads || {};
         Object.assign(t.gradeLoads, e.mergedGradeLoads);
-        t.gradeShifts = t.gradeShifts || {};
-        Object.assign(t.gradeShifts, e.mergedGradeShifts || {});
         t.tiers = GRADE_ORDER.filter(g=>gradeLoadTotal(t.gradeLoads[g])>0);
       });
       refreshOwnedViews();
@@ -6503,38 +6469,32 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
 document.getElementById("importSectionsBtn").addEventListener("click", ()=>{
   openBulkImportModal({
     title: "Import Sections from Excel/CSV",
-    hint: "Upload a spreadsheet with one row per section. Required columns: Grade Level, Section Name. Optional: Adviser, Class Shift (AM Class, PM Class, or None for Grade 11/12), Track, and Room/Building Name.",
+    hint: "Upload a spreadsheet with one row per section. Required columns: Grade Level, Section Name. Optional: Track (Sr. High only — TechPro, ACADS, or Both), Room/Building (must match an existing room name exactly, or leave blank).",
     fileInputId: "sectionImportFile",
     templateFilename: "atlas-sections-template.csv",
-    templateHeaders: ["Grade Level","Section Name","Adviser","Class Shift","Track","Room/Building Name"],
+    templateHeaders: ["Grade Level","Section Name","Track","Room/Building"],
     templateSample: [
-      ["Grade 7","Narra","Juan Dela Cruz","None","","Room 204"],
-      ["Grade 11","STEM-A","Maria Santos","PM Class","TechPro","Room 204"]
+      ["Grade 7","Narra","",""],
+      ["Grade 11","STEM-A","TechPro","Room 204"]
     ],
-    previewColumns: ["Grade Level","Section Name","Adviser","Class Shift","Track","Room/Building Name"],
+    previewColumns: ["Grade Level","Section Name","Track","Room/Building"],
     entityLabel: "section(s)",
-    errorRowCells: row => [row["grade level"]||"", row["section name"]||row["section"]||"", row["adviser"]||"", row["class shift"]||row["shift"]||"", row["track"]||row["track/strand"]||"", row["room/building name"]||row["room/building"]||row["room"]||""],
+    errorRowCells: row => [row["grade level"]||"", row["section name"]||row["section"]||"", row["track"]||"", row["room/building"]||row["room"]||""],
     parseRow(row){
       const gradeRaw = (row["grade level"]||row["grade"]||"").toString().trim();
       const name = (row["section name"]||row["section"]||"").toString().trim();
-      const adviserName = (row["adviser"]||row["adviser name"]||"").toString().trim();
-      const shiftRaw = (row["class shift"]||row["shift"]||"None").toString().trim();
       const grade = GRADE_ORDER.find(g=>g.toLowerCase()===gradeRaw.toLowerCase());
       if(!gradeRaw) return {ok:false, error:"Missing Grade Level."};
       if(!grade) return {ok:false, error:`Unrecognized grade level "${gradeRaw}". Use values like "Grade 7".`};
       if(!name) return {ok:false, error:"Missing Section Name."};
-      const adviser = adviserName ? TEACHERS.find(t=>t.name.toLowerCase()===adviserName.toLowerCase()) : null;
-      if(adviserName && !adviser) return {ok:false, error:`Adviser "${adviserName}" was not found in your faculty roster. Add the teacher first or leave Adviser blank.`};
       const isShs = grade==="Grade 11"||grade==="Grade 12";
-      const classShift = /^(am|am class)$/i.test(shiftRaw) ? "AM" : /^(pm|pm class)$/i.test(shiftRaw) ? "PM" : /^(none|--none--|none class)$/i.test(shiftRaw) ? "None" : null;
-      if(classShift===null) return {ok:false, error:`Class Shift must be AM Class, PM Class, or None (got "${shiftRaw}").`};
       let strand = (row["track"]||row["track/strand"]||"").toString().trim();
       if(strand && !isShs) strand = "";
       if(strand && !TRACK_LIST.some(t=>t.toLowerCase()===strand.toLowerCase())){
         return {ok:false, error:`Unrecognized track "${strand}". Use TechPro, ACADS, or Both.`};
       }
       strand = strand ? TRACK_LIST.find(t=>t.toLowerCase()===strand.toLowerCase()) : "";
-      const roomName = (row["room/building name"]||row["room/building"]||row["room"]||"").toString().trim();
+      const roomName = (row["room/building"]||row["room"]||"").toString().trim();
       let roomId = "";
       if(roomName){
         const room = ROOMS.find(r=>r.name.toLowerCase()===roomName.toLowerCase());
@@ -6544,11 +6504,10 @@ document.getElementById("importSectionsBtn").addEventListener("click", ()=>{
       if(SECTIONS.some(s=>s.grade===grade && s.name.toLowerCase()===name.toLowerCase())){
         return {ok:false, error:`A section named "${name}" already exists in ${grade}.`};
       }
-      const sec = { id: makeId(), grade, name, tier:tierOf(grade), subTier:subTierOf(grade), sectionType:"Regular", classShift:isShs ? classShift : "None", createdBy: currentAdminId() };
-      if(adviser) sec.adviserId = adviser.id;
+      const sec = { id: makeId(), grade, name, tier:tierOf(grade), subTier:subTierOf(grade), createdBy: currentAdminId() };
       if(strand) sec.strand = strand;
       if(roomId) sec.roomId = roomId;
-      return { ok:true, record: sec, display:[grade, name, adviser ? adviser.name : "—", isShs ? classShift+" Class" : "None", strand||"—", roomName||"—"] };
+      return { ok:true, record: sec, display:[grade, name, strand||"—", roomName||"—"] };
     },
     async commit(records){
       records.forEach(r=> SECTIONS_ALL.push(r));
@@ -6564,16 +6523,13 @@ document.getElementById("importSubjectsBtn").addEventListener("click", ()=>{
   const f = currentSubjectFilter();
   openBulkImportModal({
     title: "Import Subjects from Excel/CSV",
-    hint: `Upload a spreadsheet with one row per subject. Required columns: Subject Name, Grade Level. Optional: Track/Strand (Grade 11/12 only — use --None--, TechPro, ACADS, or Both (ACADS/TechPro)), Term, School Year, Units, Hours/Week, Subject Type (Core, Specialized, or Elective), Friday Only (Yes/No — excludes the subject from the Mon–Thu rotation so it only appears in Friday's schedule). Rows that leave Term/School Year blank use the currently selected filter (${(termById(f.term)||{}).name||"current term"} — S.Y. ${(schoolYearById(f.sy)||{}).label||"current"}).`,
+    hint: `Upload a spreadsheet with one row per subject. Required columns: Subject Name, Grade Level. Optional: Track/Strand (Sr. High only), Term, School Year, Units, Hours/Week, Subject Type (Core, Specialized, or Elective), Friday Only (Yes/No — excludes the subject from the Mon–Thu rotation so it only appears in Friday's schedule). Rows that leave Term/School Year blank use the currently selected filter (${(termById(f.term)||{}).name||"current term"} — S.Y. ${(schoolYearById(f.sy)||{}).label||"current"}).`,
     fileInputId: "subjectImportFile",
     templateFilename: "atlas-subjects-template.csv",
     templateHeaders: ["Subject Name","Grade Level","Track/Strand","Term","School Year","Units","Hours/Week","Subject Type","Friday Only"],
     templateSample: [
       ["Mathematics","Grade 7","","","","1","4","Core","No"],
-      ["Research 1","Grade 11","--None--","","","1","2","Specialized","No"],
-      ["Research 2","Grade 11","TechPro","","","1","2","Specialized","No"],
-      ["Research 3","Grade 12","ACADS","","","1","2","Specialized","No"],
-      ["Research 4","Grade 12","Both (ACADS/TechPro)","","","1","2","Specialized","No"]
+      ["Research 1","Grade 11","TechPro","","","1","2","Specialized","No"]
     ],
     previewColumns: ["Subject Name","Grade Level","Track/Strand","Term","School Year","Units","Hrs/Wk","Type","Friday Only"],
     entityLabel: "subject(s)",
@@ -6587,12 +6543,9 @@ document.getElementById("importSubjectsBtn").addEventListener("click", ()=>{
       if(!grade) return {ok:false, error:`Unrecognized grade level "${gradeRaw}". Use values like "Grade 7".`};
       const isShs = grade==="Grade 11"||grade==="Grade 12";
       let strand = (row["track/strand"]||row["track"]||"").toString().trim();
-      const normalizedStrand = strand.toLowerCase().replace(/\s+/g," ");
-      if(normalizedStrand==="--none--" || normalizedStrand==="none") strand = "";
-      else if(normalizedStrand==="both (acads/techpro)") strand = "Both";
       if(strand && !isShs) strand = "";
       if(strand && !TRACK_LIST.some(t=>t.toLowerCase()===strand.toLowerCase())){
-        return {ok:false, error:`Unrecognized track "${strand}". For Grade 11/12 use --None--, TechPro, ACADS, or Both (ACADS/TechPro).`};
+        return {ok:false, error:`Unrecognized track "${strand}". Use TechPro, ACADS, or Both.`};
       }
       strand = strand ? TRACK_LIST.find(t=>t.toLowerCase()===strand.toLowerCase()) : "";
       const termRaw = (row["term"]||"").toString().trim();
@@ -6674,6 +6627,10 @@ function scheduleValidationReport(){
   return { status, hardProblems, openConflicts };
 }
 document.getElementById("validateScheduleBtn").addEventListener("click", async ()=>{
+  if(!SCHEDULE_GENERATED_AT){
+    openConfirm("<b>No Schedule Available</b><br><br>There is no schedule to validate. Please generate a schedule first.", ()=>{}, "Close");
+    return;
+  }
   const { status, hardProblems, openConflicts } = scheduleValidationReport();
   const badgeColor = status.level==="ok" ? "green" : status.level==="warn" ? "gold" : "maroon";
   const hardList = hardProblems.slice(0,6).map(p=>`<li>${esc(p)}</li>`).join("") + (hardProblems.length>6 ? `<li>…and ${hardProblems.length-6} more.</li>` : "");
@@ -6689,7 +6646,8 @@ document.getElementById("validateScheduleBtn").addEventListener("click", async (
     FINAL_SCHEDULE_VALIDATED_BY = currentUserLabel();
     await saveData();
     renderAll();
-    showToast("Schedule validated — Final Classroom Schedule is now available to print.");
+    navigateTo("finalschedule");
+    showToast("Schedule validated — Final Classroom Schedule is now available.");
     return;
   }
   FINAL_SCHEDULE_VALIDATED_AT = null;
@@ -6937,16 +6895,7 @@ async function handleAuthenticatedUser(fbUser){
     showToast("Signed in, but couldn't reach the user profile database. Some features may not work until this is resolved.", true);
     profile = { name: fbUser.displayName || fbUser.email, email: fbUser.email, role: "pending" };
   }
-  const resolvedName = (profile && profile.name) || fbUser.displayName || fbUser.email || "Admin";
-  const resolvedEmail = (profile && profile.email) || fbUser.email || (fbUser.providerData && fbUser.providerData[0] && fbUser.providerData[0].email) || "";
-  AUTH_SESSION = {
-    id: fbUser.uid,
-    uid: fbUser.uid,
-    name: resolvedName,
-    email: resolvedEmail,
-    role: (profile && profile.role) || "pending",
-    tourState: (profile && profile.tourState) || null
-  };
+  AUTH_SESSION = { id: fbUser.uid, uid: fbUser.uid, name: profile.name, email: profile.email, role: profile.role };
 
   const usesEmailPassword = fbUser.providerData.some(p=>p.providerId==="password");
   if(usesEmailPassword && !fbUser.emailVerified){
@@ -6985,12 +6934,7 @@ async function handleAuthenticatedUser(fbUser){
   const line = document.getElementById("sidebarUserLine");
   if(line) line.innerHTML = `Signed in as <b style="color:#EAF0F6;">${esc(AUTH_SESSION.name || AUTH_SESSION.email)}</b>`;
   await initApp();
-  if(typeof ATLASTour !== "undefined"){
-    if(profile && profile.tourState){
-      ATLASTour.seedTourState(profile.tourState);
-    }
-    ATLASTour.maybeOfferOnLogin();
-  }
+  if(typeof ATLASTour !== "undefined") ATLASTour.maybeOfferOnLogin();
   if(WELCOME_TOAST_MESSAGE){ showToast(WELCOME_TOAST_MESSAGE); WELCOME_TOAST_MESSAGE = null; }
 }
 
@@ -7131,6 +7075,7 @@ document.getElementById("logoutBtn").addEventListener("click", ()=>{
     }else{
       showToast("You are offline. Local data was saved; cloud backup will happen after you reconnect and log in.", true);
     }
+    if(typeof ATLASTour !== "undefined") await ATLASTour.resetDeferredOnLogout();
     await firebase.auth().signOut();
     switchAuthTab("login");
     document.getElementById("loginEmail").value = "";
@@ -7271,10 +7216,10 @@ const TOUR_STEPS = [
   { page:"conflicts", selector:"#conflictTabs", title:"Conflict Filters",
     body:["Use these tabs to switch between all conflicts, unresolved conflicts, Auto-Fix, resolved items, and the complete conflict history.",
           "This keeps active problems separate from resolved records while preserving an audit trail."] },
-  { page:"conflicts", selector:'#conflictTabs button[data-ctab="autofix"]', title:"Auto-Fix Changes",
+  { page:"conflicts", selector:"#changesBody", title:"Auto-Fix Changes",
     body:["After Auto-Fix runs, review this table to see which teacher or schedule assignments changed.",
           "You can inspect the recorded changes and undo the most recent Auto-Fix run when needed."] },
-  { page:"conflicts", selector:'#conflictTabs button[data-ctab="history"]', title:"Conflict History",
+  { page:"conflicts", selector:"#cmgmtHistoryBody", title:"Conflict History",
     body:["Conflict History records when a problem was detected, what schedule entry it affected, and how it was resolved.",
           "Use it when auditing or explaining why a final schedule changed."] },
   { page:"reports", selector:"#reportLoadByArea", title:"Reports",
@@ -7283,7 +7228,7 @@ const TOUR_STEPS = [
   { page:"database", selector:"#syncNowBtn", title:"Database & Sync",
     body:["Database & Sync lets you monitor stored application data, synchronization status, backups, exports, and restore options.",
           "ATLAS stores application data locally and can synchronize supported records with the configured cloud database."] },
-  { page:"settings", selector:"#page-settings .panel:first-child", title:"Admin Settings",
+  { page:"settings", selector:"#saveSettings", title:"Admin Settings",
     body:["Admin Settings controls important school-wide scheduling configuration: school start time, grade-level bell schedules, class periods, breaks, lunch, and the Friday schedule.",
           "Configure these settings carefully — the bell schedule is used when generating class schedules."] },
   { page:"settings", selector:"#saveSchoolName", title:"School Identity",
@@ -7303,160 +7248,43 @@ const ATLASTour = (function(){
   let idx = 0;
   let active = false;
   let resizeHandler = null;
-  let cachedTourState = null;
 
-  function currentUserIdentifiers(){
-    const list = [];
-    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
-      if(AUTH_SESSION.uid) list.push(String(AUTH_SESSION.uid).trim());
-      if(AUTH_SESSION.id && AUTH_SESSION.id !== AUTH_SESSION.uid) list.push(String(AUTH_SESSION.id).trim());
-      if(AUTH_SESSION.email) list.push(String(AUTH_SESSION.email).toLowerCase().trim());
-    }
-    const cur = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
-    if(cur){
-      if(cur.uid && !list.includes(cur.uid)) list.push(String(cur.uid).trim());
-      if(cur.email){
-        const em = String(cur.email).toLowerCase().trim();
-        if(!list.includes(em)) list.push(em);
-      }
-    }
-    return list;
-  }
-
-  function seedTourState(stateObj){
-    if(stateObj && typeof stateObj === "object"){
-      cachedTourState = stateObj;
-    }
-  }
-
-  async function syncTourStateToCloud(stateObj){
-    const user = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
-    if(!user || !user.uid || !CLOUD_CONFIG.enabled || !navigator.onLine) return;
-    try{
-      const authHeader = await firestoreAuthHeader();
-      const query = "?updateMask.fieldPaths=tourState" + (CLOUD_CONFIG.anonKey ? "&key="+encodeURIComponent(CLOUD_CONFIG.anonKey) : "");
-      await fetch(firestoreBase()+"/users/"+encodeURIComponent(user.uid)+query, {
-        method: "PATCH",
-        headers: Object.assign({"Content-Type":"application/json"}, authHeader),
-        body: JSON.stringify({ fields: firestoreEncodeFields({ tourState: stateObj }) })
-      });
-    }catch(e){
-      console.warn("ATLASTour: cloud tourState sync failed (local state preserved):", e);
-    }
-  }
-
-  async function resetTourStateInCloud(){
-    const user = (typeof firebase !== "undefined" && firebase.auth && firebase.auth().currentUser);
-    if(!user || !user.uid || !CLOUD_CONFIG.enabled || !navigator.onLine) return;
-    try{
-      const authHeader = await firestoreAuthHeader();
-      const query = "?updateMask.fieldPaths=tourState" + (CLOUD_CONFIG.anonKey ? "&key="+encodeURIComponent(CLOUD_CONFIG.anonKey) : "");
-      await fetch(firestoreBase()+"/users/"+encodeURIComponent(user.uid)+query, {
-        method: "PATCH",
-        headers: Object.assign({"Content-Type":"application/json"}, authHeader),
-        body: JSON.stringify({ fields: { tourState: { nullValue: null } } })
-      });
-    }catch(e){
-      console.warn("ATLASTour: cloud tourState reset failed:", e);
-    }
+  function currentEmail(){
+    return (AUTH_SESSION && AUTH_SESSION.email) ? AUTH_SESSION.email.toLowerCase() : null;
   }
 
   async function loadTourState(){
-    if(cachedTourState) return cachedTourState;
-    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION && AUTH_SESSION.tourState){
-      cachedTourState = AUTH_SESSION.tourState;
-      return cachedTourState;
-    }
-    const ids = currentUserIdentifiers();
-    // 1. Try Store
+    const email = currentEmail();
+    if(!email) return null;
     try{
       const raw = await Store.get(TOUR_STATE_KEY);
-      let all = {};
-      if(raw){
-        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
-      }
-      for(const id of ids){
-        if(all && all[id]){
-          cachedTourState = all[id];
-          return cachedTourState;
-        }
-      }
-      if(all && all["_last"]){
-        cachedTourState = all["_last"];
-        return cachedTourState;
-      }
-    }catch(e){ console.warn("ATLASTour: could not load from Store:", e); }
-
-    // 2. Try direct localStorage
-    try{
-      if(typeof window !== "undefined" && window.localStorage){
-        for(const id of ids){
-          const direct = window.localStorage.getItem("atlas_tour_seen_" + id);
-          if(direct){
-            cachedTourState = { status: direct, updatedAt: new Date().toISOString() };
-            return cachedTourState;
-          }
-        }
-        const stateRaw = window.localStorage.getItem(TOUR_STATE_KEY);
-        if(stateRaw){
-          try{
-            const parsed = JSON.parse(stateRaw);
-            for(const id of ids){
-              if(parsed && parsed[id]){
-                cachedTourState = parsed[id];
-                return cachedTourState;
-              }
-            }
-          }catch(err){}
-        }
-        const deviceSeen = window.localStorage.getItem("atlas_tour_device_seen");
-        if(deviceSeen){
-          cachedTourState = { status: deviceSeen, updatedAt: new Date().toISOString() };
-          return cachedTourState;
-        }
-      }
-    }catch(e){ /* ignore storage restrictions */ }
-
-    return null;
+      const all = raw ? JSON.parse(raw) : {};
+      return all[email] || null;
+    }catch(e){ console.error("ATLASTour: could not load tour state:", e); return null; }
   }
 
   async function saveTourState(status){
-    const stateObj = { status: status || "dismissed", updatedAt: new Date().toISOString() };
-    cachedTourState = stateObj;
-    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
-      AUTH_SESSION.tourState = stateObj;
-    }
-    const ids = currentUserIdentifiers();
-
-    // 1. Save to Store
+    const email = currentEmail();
+    if(!email) return;
     try{
       const raw = await Store.get(TOUR_STATE_KEY);
-      let all = {};
-      if(raw){
-        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
-      }
-      if(!all || typeof all !== "object") all = {};
-      ids.forEach(id=>{ all[id] = stateObj; });
-      all["_last"] = stateObj;
+      const all = raw ? JSON.parse(raw) : {};
+      all[email] = { status, updatedAt: new Date().toISOString() };
       await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
-    }catch(e){ console.error("ATLASTour: could not save to Store:", e); }
-
-    // 2. Save directly to localStorage for instant synchronous safety
-    try{
-      if(typeof window !== "undefined" && window.localStorage){
-        ids.forEach(id=>{
-          try{ window.localStorage.setItem("atlas_tour_seen_" + id, status || "dismissed"); }catch(err){}
-        });
-        window.localStorage.setItem("atlas_tour_device_seen", status || "dismissed");
-      }
-    }catch(e){}
-
-    // 3. Sync to cloud Firestore user doc
-    syncTourStateToCloud(stateObj);
+    }catch(e){ console.error("ATLASTour: could not save tour state:", e); }
   }
 
   async function resetDeferredOnLogout(){
-    // Kept for backward compatibility
+    const email = currentEmail();
+    if(!email) return;
+    try{
+      const raw = await Store.get(TOUR_STATE_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      if(all[email] && all[email].status === "deferred"){
+        delete all[email];
+        await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
+      }
+    }catch(e){ console.error("ATLASTour: could not reset deferred tour state:", e); }
   }
 
   function root(){ return document.getElementById("atlasTourRoot"); }
@@ -7612,26 +7440,22 @@ const ATLASTour = (function(){
             <p style="font-size:13.5px;color:var(--ink);margin:0;">You've completed the ATLAS system tour. You can now manage your academic setup, teachers, subjects, sections, teaching loads, class schedules, conflicts, reports, and system settings.</p>
           </div>
           <div class="modal-foot">
-            <button class="btn ghost" id="tourDoneRestartLater">Restart Tour</button>
+            <button class="btn ghost" id="tourDoneRestartLater">Restart Tour Later</button>
             <button class="btn gold" id="tourDoneFinish">Finish Tour</button>
           </div>
         </div>
       </div>`;
     const close = ()=>{ r.innerHTML = ""; };
     document.getElementById("tourDoneFinish").onclick = ()=>{ close(); maybeOfferInstallPrompt(); };
-    document.getElementById("tourDoneRestartLater").onclick = ()=>{ close(); restartTour(); };
+    document.getElementById("tourDoneRestartLater").onclick = ()=>{ close(); maybeOfferInstallPrompt(); };
   }
 
   function showWelcome(){
     const r = root();
-    if(!r) return;
     r.innerHTML = `
       <div class="modal-backdrop" id="tourWelcomeBackdrop">
-        <div class="modal-box narrow" role="dialog" aria-modal="true" aria-labelledby="tourWelcomeTitle">
-          <div class="modal-head">
-            <h3 id="tourWelcomeTitle">Welcome to ATLAS</h3>
-            <button class="modal-close" id="tourWelcomeClose" aria-label="Close">&times;</button>
-          </div>
+        <div class="modal-box narrow">
+          <div class="modal-head"><h3>Welcome to ATLAS</h3></div>
           <div class="modal-body">
             <div class="hint" style="margin-top:-8px;">Teaching Loads &amp; Class Schedules</div>
             <p style="font-size:13.5px;color:var(--ink);margin:0;">Welcome to ATLAS. This quick tour will guide you through the main features of the system and show you how they work together to manage teachers, subjects, sections, teaching loads, schedules, conflicts, and reports.</p>
@@ -7645,132 +7469,39 @@ const ATLASTour = (function(){
           </div>
         </div>
       </div>`;
-
-    let closed = false;
-    const dismiss = (status)=>{
-      if(closed) return;
-      closed = true;
-      document.removeEventListener("keydown", handleWelcomeKeydown);
-      r.innerHTML = "";
-      saveTourState(status || "dismissed");
-    };
-
-    const handleWelcomeKeydown = (e)=>{
-      if(e.key === "Escape"){
-        e.preventDefault();
-        dismiss("dismissed");
-      }
-    };
-    document.addEventListener("keydown", handleWelcomeKeydown);
-
-    const backdrop = document.getElementById("tourWelcomeBackdrop");
-    if(backdrop){
-      backdrop.addEventListener("click", (e)=>{
-        if(e.target === backdrop) dismiss("dismissed");
-      });
-    }
-
-    const closeBtn = document.getElementById("tourWelcomeClose");
-    if(closeBtn) closeBtn.onclick = ()=> dismiss("dismissed");
-
-    const laterBtn = document.getElementById("tourWelcomeLater");
-    if(laterBtn) laterBtn.onclick = ()=> dismiss("dismissed");
-
-    const skipBtn = document.getElementById("tourWelcomeSkip");
-    if(skipBtn) skipBtn.onclick = ()=>{
-      dismiss("skipped");
-      maybeOfferInstallPrompt();
-    };
-
-    const startBtn = document.getElementById("tourWelcomeStart");
-    if(startBtn) startBtn.onclick = ()=>{
-      if(closed) return;
-      closed = true;
-      document.removeEventListener("keydown", handleWelcomeKeydown);
-      r.innerHTML = "";
-      saveTourState("started");
-      startTour();
-    };
+    document.getElementById("tourWelcomeStart").onclick = ()=>{ r.innerHTML=""; startTour(); };
+    document.getElementById("tourWelcomeSkip").onclick = ()=>{ r.innerHTML=""; saveTourState("skipped"); maybeOfferInstallPrompt(); };
+    document.getElementById("tourWelcomeLater").onclick = ()=>{ r.innerHTML=""; saveTourState("deferred"); };
   }
 
   function startTour(){
     active = true;
-    idx = 0;
     closeTourDrawer();
     document.addEventListener("keydown", onKeydown);
     showStep(0);
   }
 
-  async function restartTour(){
-    teardown();
-    idx = 0;
-    await saveTourState("started");
+  function restartTour(){
+    const r = root();
+    if(r) r.innerHTML = "";
     startTour();
-  }
-
-  async function resetTourState(){
-    cachedTourState = null;
-    if(typeof AUTH_SESSION !== "undefined" && AUTH_SESSION){
-      delete AUTH_SESSION.tourState;
-    }
-    const ids = currentUserIdentifiers();
-    try{
-      const raw = await Store.get(TOUR_STATE_KEY);
-      let all = {};
-      if(raw){
-        try{ all = typeof raw === "string" ? JSON.parse(raw) : raw; }catch(err){ all = {}; }
-      }
-      if(all && typeof all === "object"){
-        ids.forEach(id=>{ delete all[id]; });
-        delete all["_last"];
-        await Store.set(TOUR_STATE_KEY, JSON.stringify(all));
-      }
-    }catch(e){ console.error("ATLASTour: could not reset Store:", e); }
-
-    try{
-      if(typeof window !== "undefined" && window.localStorage){
-        ids.forEach(id=>{
-          try{ window.localStorage.removeItem("atlas_tour_seen_" + id); }catch(err){}
-        });
-        window.localStorage.removeItem("atlas_tour_device_seen");
-      }
-    }catch(e){}
-
-    resetTourStateInCloud();
-    showToast("Tour reset. The 'Welcome to ATLAS' prompt will appear on your next login.");
   }
 
   async function maybeOfferOnLogin(){
     const state = await loadTourState();
-    // Show the welcome popup ONLY on a user's very first login (no saved tour state).
-    // Any prior interaction (Skip, Maybe Later, Start, Finish) sets a state that
-    // prevents the auto-popup from ever appearing again on subsequent logins.
-    // Manual replay is always available via the Admin Settings -> Guided Tour button.
-    if(!state) showWelcome();
-    else maybeShowInstallPrompt();
+    if(!state || (state.status !== "completed" && state.status !== "skipped" && state.status !== "deferred")) showWelcome();
+    else maybeOfferInstallPrompt();
   }
 
-  async function maybeShowInstallPrompt(){
+  async function maybeOfferInstallPrompt(){
     const state = await loadTourState();
-    if(!state) return;
-    // Only show install prompt after tour has been completed; respect skipped/dismissed/no-state
-    if(state.status === "completed"){
-      // Delegate to the app's existing PWA install prompt handler
-      if(typeof window.maybeOfferInstallPrompt === "function") window.maybeOfferInstallPrompt();
-    }
+    if(state && (state.status === "completed" || state.status === "skipped")) window.maybeOfferInstallPrompt();
   }
 
-  return { startTour, nextStep, previousStep, skipTour, finishTour, restartTour, resetTourState, showStep, saveTourState, loadTourState, seedTourState, maybeOfferOnLogin, maybeShowInstallPrompt, resetDeferredOnLogout };
+  return { startTour, nextStep, previousStep, skipTour, finishTour, restartTour, showStep, saveTourState, loadTourState, maybeOfferOnLogin, maybeOfferInstallPrompt, resetDeferredOnLogout };
 })();
 
-const startGuidedTourBtn = document.getElementById("startGuidedTourBtn");
-if(startGuidedTourBtn) startGuidedTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
-const resetGuidedTourBtn = document.getElementById("resetGuidedTourBtn");
-if(resetGuidedTourBtn) resetGuidedTourBtn.addEventListener("click", ()=> ATLASTour.resetTourState());
-const topbarTourBtn = document.getElementById("topbarTourBtn");
-if(topbarTourBtn) topbarTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
-const sidebarTourBtn = document.getElementById("sidebarTourBtn");
-if(sidebarTourBtn) sidebarTourBtn.addEventListener("click", ()=> ATLASTour.restartTour());
+document.getElementById("startGuidedTourBtn").addEventListener("click", ()=> ATLASTour.restartTour());
 document.getElementById("installAppBtn").addEventListener("click", requestAtlasInstall);
 updateInstallButton();
 
