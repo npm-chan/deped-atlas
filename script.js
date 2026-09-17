@@ -1052,7 +1052,7 @@ function setSaveIndicator(state){
 function snapshotData(){
   return {
     teachersAll: TEACHERS_ALL,
-    sectionsAll: SECTIONS_ALL.map(s=>({id:s.id, grade:s.grade, name:s.name, strand:s.strand, roomId:s.roomId, sectionType:s.sectionType, classShift:s.classShift, createdBy:s.createdBy})),
+    sectionsAll: SECTIONS_ALL.map(s=>({id:s.id, grade:s.grade, name:s.name, strand:s.strand, adviserId:s.adviserId, roomId:s.roomId, sectionType:s.sectionType, classShift:s.classShift, createdBy:s.createdBy})),
     currentTerm: CURRENT_TERM,
     gradeConfig: GRADE_CONFIG,
     adminStart: ADMIN_START,
@@ -1088,6 +1088,8 @@ function snapshotData(){
     finalAuditIdCounter,
     finalScheduleFinalizedAt: FINAL_SCHEDULE_FINALIZED_AT,
     finalScheduleFinalizedBy: FINAL_SCHEDULE_FINALIZED_BY,
+    finalScheduleValidatedAt: FINAL_SCHEDULE_VALIDATED_AT,
+    finalScheduleValidatedBy: FINAL_SCHEDULE_VALIDATED_BY,
     specialProgramSubjects: SPECIAL_PROGRAM_SUBJECTS,
     scheduleDataVersion: 2
   };
@@ -1250,6 +1252,8 @@ function applySnapshot(data){
   finalAuditIdCounter = data.finalAuditIdCounter || (FINAL_SCHEDULE_AUDIT_LOG.length+1);
   FINAL_SCHEDULE_FINALIZED_AT = data.finalScheduleFinalizedAt || null;
   FINAL_SCHEDULE_FINALIZED_BY = data.finalScheduleFinalizedBy || null;
+  FINAL_SCHEDULE_VALIDATED_AT = data.finalScheduleValidatedAt || null;
+  FINAL_SCHEDULE_VALIDATED_BY = data.finalScheduleValidatedBy || null;
   SPECIAL_PROGRAM_SUBJECTS = (Array.isArray(data.specialProgramSubjects) && data.specialProgramSubjects.length)
     ? data.specialProgramSubjects
     : ["ICT", "RFS", "Research"];
@@ -1668,6 +1672,8 @@ function buildTimeline(section, day){
 let SCHEDULE_ASSIGNMENTS = {};   // "sectionId|periodIdx" -> teacherId
 let SCHEDULE_CONFLICTS = [];     // [{sectionLabel, subject, start, end, reason}]
 let SCHEDULE_GENERATED_AT = null;
+let FINAL_SCHEDULE_VALIDATED_AT = null;
+let FINAL_SCHEDULE_VALIDATED_BY = null;
 let CURRENT_TERM = "1st Term";   // which term the current schedule was generated for
 // Section-level period->subject overrides written by the time-slot-swap
 // Auto-Fix strategy (and, in principle, by a future manual "move subject"
@@ -2108,6 +2114,8 @@ function generateSchedule(opts){
   SCHEDULE_CONFLICTS = SCHEDULE_CONFLICTS.filter(c=>c.type!=="ROOM_CONFLICT" && c.type!=="AMPM_SHIFT_CONFLICT")
     .concat(detectRoomConflicts(), detectShiftMisconfigurations());
   SCHEDULE_GENERATED_AT = new Date().toISOString();
+  FINAL_SCHEDULE_VALIDATED_AT = null;
+  FINAL_SCHEDULE_VALIDATED_BY = null;
   logConflictsDetected(SCHEDULE_CONFLICTS);
   return result;
 }
@@ -2425,6 +2433,8 @@ function autoFixConflicts(){
   SCHEDULE_ASSIGNMENTS = repaired.assignmentMap;
   SCHEDULE_CONFLICTS = finalConflicts;
   SCHEDULE_GENERATED_AT = new Date().toISOString();
+  FINAL_SCHEDULE_VALIDATED_AT = null;
+  FINAL_SCHEDULE_VALIDATED_BY = null;
   return { before, after: remaining, changed, changes, detected, fixed, remaining, remainingConflicts: finalConflicts };
 }
 
@@ -3393,6 +3403,8 @@ function openTeacherForm(existingId){
       selectedTeacher = id;
       teacherRecord = t;
     }
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     closeModal();
     await saveData();
     await persistEntityChange("teachers", teacherRecord, isEdit ? "UPDATE" : "CREATE");
@@ -3415,6 +3427,8 @@ function deleteTeacher(id){
     Object.keys(SCHEDULE_ASSIGNMENTS).forEach(k=>{
       if(SCHEDULE_ASSIGNMENTS[k]===id) delete SCHEDULE_ASSIGNMENTS[k];
     });
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     await saveData();
     await persistEntityChange("teachers", {id}, "DELETE");
     renderAll();
@@ -3438,6 +3452,13 @@ function openSectionForm(existingId){
           </label>
           <label class="field">Section Name
             <input type="text" id="sName" value="${isEdit?esc(existing.name):''}" placeholder="e.g. Narra">
+          </label>
+          <label class="field">Adviser
+            <select id="sAdviser">
+              <option value="">— Unassigned —</option>
+              ${TEACHERS.map(t=>`<option value="${t.id}" ${isEdit&&existing.adviserId===t.id?'selected':''}>${esc(t.name)}</option>`).join("")}
+            </select>
+            ${TEACHERS.length ? '' : '<span class="hint">Add a teacher to your faculty roster first.</span>'}
           </label>
           <label class="field" id="sStrandField" style="display:none;">Track (Sr. High only)
             <select id="sStrand">
@@ -3463,12 +3484,6 @@ function openSectionForm(existingId){
           <div id="sRoomNewFields" style="display:none; background:#F7F4E9; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:-4px;">
             <label class="field">New room name
               <input type="text" id="nrName" placeholder="e.g. Room 204">
-            </label>
-            <label class="field" style="margin-top:8px;">Type
-              <input type="text" id="nrType" placeholder="e.g. Classroom, Science Lab, Gym">
-            </label>
-            <label class="field" style="margin-top:8px;">Capacity
-              <input type="number" min="1" id="nrCapacity">
             </label>
             <div class="err-text" id="nrErr"></div>
             <button type="button" class="btn gold" id="nrSaveBtn" style="margin-top:4px;">Save Room</button>
@@ -3498,16 +3513,14 @@ function openSectionForm(existingId){
   });
   document.getElementById("nrSaveBtn").onclick = async ()=>{
     const name = document.getElementById("nrName").value.trim();
-    const type = document.getElementById("nrType").value.trim();
-    const capacity = Number(document.getElementById("nrCapacity").value)||null;
     if(!name){ document.getElementById("nrErr").textContent = "Please enter a room name."; return; }
     if(ROOMS.some(r=>r.name.toLowerCase()===name.toLowerCase())){ document.getElementById("nrErr").textContent = "A room with this name already exists."; return; }
-    const room = { id:"RM"+(roomCounter++), name, type, capacity };
+    const room = { id:"RM"+(roomCounter++), name };
     ROOMS.push(room);
     await saveData();
     const opt = document.createElement("option");
     opt.value = room.id;
-    opt.textContent = room.name + (room.type ? " — "+room.type : "");
+    opt.textContent = room.name;
     roomSelect.insertBefore(opt, roomSelect.querySelector('option[value="__new__"]'));
     roomSelect.value = room.id;
     lastRoomValue = room.id;
@@ -3521,6 +3534,7 @@ function openSectionForm(existingId){
   document.getElementById("sSave").onclick = ()=> withButtonLoading(document.getElementById("sSave"), async ()=>{
     const grade = document.getElementById("sGrade").value;
     const name = document.getElementById("sName").value.trim();
+    const adviserId = document.getElementById("sAdviser").value || undefined;
     const strandRaw = document.getElementById("sStrand") ? document.getElementById("sStrand").value : "";
     const strand = (grade==="Grade 11"||grade==="Grade 12") && strandRaw ? strandRaw : undefined;
     const isShs = (grade==="Grade 11"||grade==="Grade 12");
@@ -3536,6 +3550,7 @@ function openSectionForm(existingId){
     if(isEdit){
       existing.grade = grade; existing.name = name;
       if(strand) existing.strand = strand; else delete existing.strand;
+      if(adviserId) existing.adviserId = adviserId; else delete existing.adviserId;
       if(roomId) existing.roomId = roomId; else delete existing.roomId;
       existing.sectionType = sectionType; existing.classShift = classShift;
       sectionRecord = existing;
@@ -3543,11 +3558,14 @@ function openSectionForm(existingId){
       const id = makeId(); // stable UUID — safe to create the same section offline on two devices without ID collisions
       const sec = { id, grade, name, tier:tierOf(grade), subTier:subTierOf(grade), sectionType, classShift, createdBy: currentAdminId() };
       if(strand) sec.strand = strand;
+      if(adviserId) sec.adviserId = adviserId;
       if(roomId) sec.roomId = roomId;
       SECTIONS_ALL.push(sec);
       refreshOwnedViews();
       sectionRecord = sec;
     }
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     recomputeSectionIdx();
     closeModal();
     await saveData();
@@ -3572,7 +3590,8 @@ function openSectionViewModal(id){
           ${row("Grade Level", esc(s.grade))}
           ${row("Section Name", `<b>${esc(s.name)}</b>`)}
           ${row("Track/Strand", s.strand ? `<span class="tag maroon">${esc(s.strand)}</span>` : '<span class="hint">—</span>')}
-          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>${room.type?` — ${esc(room.type)}`:""}` : '<span class="hint">Unassigned</span>')}
+          ${row("Adviser", s.adviserId && teacherById(s.adviserId) ? esc(teacherById(s.adviserId).name) : '<span class="hint">Unassigned</span>')}
+          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>` : '<span class="hint">Unassigned</span>')}
           ${row("Subjects Assigned", subs.length ? subs.map(sub=>esc(sub.name)).join(", ") : '<span class="hint">None yet</span>')}
         </div>
         <div class="modal-foot">
@@ -3603,7 +3622,8 @@ function openSectionViewModal(id){
           ${row("Track/Strand", s.strand ? `<span class="tag maroon">${esc(s.strand)}</span>` : '<span class="hint">—</span>')}
           ${row("Section Type", `<span class="tag ${s.sectionType==='Special Program'?'maroon':'gold'}">${esc(s.sectionType||'Regular')}</span>`)}
           ${isSHSGrade(s.grade) ? row("Class Shift", s.classShift && s.classShift!=='None' ? `<span class="tag gold">${esc(s.classShift)} Class</span>` : '<span class="hint">None</span>') : ''}
-          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>${room.type?' — '+esc(room.type):''}` : '<span class="hint">Unassigned</span>')}
+          ${row("Adviser", s.adviserId && teacherById(s.adviserId) ? esc(teacherById(s.adviserId).name) : '<span class="hint">Unassigned</span>')}
+          ${row("Room / Building", room ? `<b>${esc(room.name)}</b>` : '<span class="hint">Unassigned</span>')}
           ${row("Subjects Assigned", subs.length)}
           <div style="font-size:12px;color:var(--ink-soft);font-weight:700;margin:12px 0 6px;">Assigned Subjects</div>
           ${subs.length ? `<ul style="margin:0;padding-left:18px;font-size:13px;">${subs.map(sub=>`<li>${esc(sub.name)} (${esc(sub.code)})</li>`).join("")}</ul>` : `<div class="hint">No subjects assigned for this section yet.</div>`}
@@ -3627,6 +3647,8 @@ function deleteSection(id){
     const idx = SECTIONS_ALL.findIndex(x=>x.id===id);
     if(idx>-1) SECTIONS_ALL.splice(idx,1);
     refreshOwnedViews();
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     await saveData();
     await persistEntityChange("sections", {id}, "DELETE");
     renderAll();
@@ -5014,17 +5036,15 @@ function renderSections(){
   const tbody = document.querySelector("#sectionsTable tbody");
   tbody.innerHTML = visible.length ? visible.map(s=>{
     const cfg = GRADE_CONFIG[s.grade];
-    const coordination = s.strand ? s.strand+" Track (Subject Teachers — see Schedule)" : "Subject Teachers (see Schedule)";
+    const adviser = s.adviserId ? teacherById(s.adviserId) : null;
     const room = s.roomId ? ROOMS.find(r=>r.id===s.roomId) : null;
-    const roomCell = room ? `<b>${esc(room.name)}</b>${room.type?`<div class="hint">${esc(room.type)}</div>`:""}` : `<span class="hint">Unassigned</span>`;
+    const roomCell = room ? `<b>${esc(room.name)}</b>` : `<span class="hint">Unassigned</span>`;
     return `<tr>
       <td class="check-cell"><input type="checkbox" class="row-check" data-id="${s.id}"></td>
       <td>${s.grade}</td>
       <td>${s.name}${s.strand?` <span class="tag maroon">${s.strand}</span>`:""}${s.sectionType==='Special Program'?' <span class="tag maroon">Special Program</span>':''}${s.classShift&&s.classShift!=='None'?` <span class="tag gold">${s.classShift} Class</span>`:''}${syncBadgeHtml("sections", s.id)}</td>
-      <td><span class="tag gold">Subject-based</span></td>
-      <td>${coordination}</td>
+      <td>${adviser ? esc(adviser.name) : '<span class="hint">Unassigned</span>'}</td>
       <td>${roomCell}</td>
-      <td>${subjectsForSection(s).length}</td>
       <td>${cfg.periods}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="View section details" data-view-section="${s.id}">👁️ View</button>
@@ -5032,7 +5052,7 @@ function renderSections(){
         <button class="icon-btn danger" title="Permanently delete" data-delete-section="${s.id}">🗑️ Delete</button>
       </div></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="9" class="empty">No sections for ${SECTION_GRADE_FILTER==="All"?"the school":SECTION_GRADE_FILTER} yet.</td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="empty">No sections for ${SECTION_GRADE_FILTER==="All"?"the school":SECTION_GRADE_FILTER} yet.</td></tr>`;
   tbody.querySelectorAll("[data-view-section]").forEach(b=>{ b.onclick = ()=>openSectionViewModal(b.dataset.viewSection); });
   tbody.querySelectorAll("[data-edit-section]").forEach(b=>{ b.onclick = ()=>openSectionForm(b.dataset.editSection); });
   tbody.querySelectorAll("[data-delete-section]").forEach(b=>{ b.onclick = ()=>deleteSection(b.dataset.deleteSection); });
@@ -5381,6 +5401,8 @@ function openScheduleEntryModal(sectionId, day, periodIdx, extraId){
       after: { subject, teacherId, start, end, day:d }
     });
 
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     close();
     saveData();
     renderAll();
@@ -5412,6 +5434,8 @@ function deleteScheduleEntry(sectionId, day, periodIdx, extraId){
       after: null
     });
 
+    FINAL_SCHEDULE_VALIDATED_AT = null;
+    FINAL_SCHEDULE_VALIDATED_BY = null;
     await saveData();
     renderAll();
     showToast("Schedule entry removed.");
@@ -5801,6 +5825,17 @@ function buildConsolidatedScheduleHTML(forPrint){
 function renderFinalScheduleResults(){
   const f = collectFinalScheduleFilters();
   const warnEl = document.getElementById("fsTermWarning");
+  const printBtn = document.getElementById("fsPrintAllBtn");
+  const excelBtn = document.getElementById("fsDownloadExcelBtn");
+  const isValidated = !!FINAL_SCHEDULE_VALIDATED_AT;
+  if(printBtn) printBtn.disabled = !isValidated;
+  if(excelBtn) excelBtn.disabled = !isValidated;
+  if(!isValidated){
+    warnEl.style.display = "block";
+    warnEl.textContent = "The schedule is hidden until an Admin generates it and successfully clicks Validate Schedule on the Class Schedule page.";
+    document.getElementById("fsResults").innerHTML = "";
+    return;
+  }
   if(finalScheduleOutOfContext(f)){
     warnEl.style.display = "block";
     warnEl.textContent = "No saved schedule to show for that School Year/Term combination — only the currently active School Year and Term (selected on School Year & Terms) has a generated schedule. Switch to it there first, then come back here.";
@@ -5867,6 +5902,7 @@ function applyPrintOrientation(){
 // Prints the ENTIRE matching weekly schedule as one continuous document —
 // a single table with a repeating header, never separate printouts per day.
 function printAllFinalSchedules(){
+  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the generated schedule before printing the Final Classroom Schedule.", true); return; }
   const f = collectFinalScheduleFilters();
   if(finalScheduleOutOfContext(f)){ showToast("Switch to the current School Year/Term to print its schedule.", true); return; }
   const html = buildConsolidatedScheduleHTML(true);
@@ -5882,6 +5918,7 @@ function printAllFinalSchedules(){
 // active filter (Grade Level, Section, Day, Teacher, Room/Building), using
 // the exact same row data as the on-screen consolidated document.
 function downloadFinalScheduleExcel(){
+  if(!FINAL_SCHEDULE_VALIDATED_AT){ showToast("Validate the generated schedule before downloading the Final Classroom Schedule.", true); return; }
   const f = collectFinalScheduleFilters();
   if(finalScheduleOutOfContext(f)){ showToast("Switch to the current School Year/Term to download its schedule.", true); return; }
   const sy = schoolYearById(CURRENT_SCHOOL_YEAR_ID);
@@ -6349,14 +6386,14 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
   const splitList = v => (v||"").toString().split(/[;,]/).map(s=>s.trim()).filter(Boolean);
   openBulkImportModal({
     title: "Import Teacher Loads from Excel/CSV",
-    hint: "One row per Teacher + Grade Level. Required columns: Teacher Name, Role/Position, Grade Level, Regular Class Loads, Special Program Loads (whole numbers, 0 or greater — Special Program Loads = 0 is normal and won't produce an error). Special Program Subject is required whenever Special Program Loads is greater than 0 (any new subject name is added to the Special Program Subject list automatically). Optional: Employee/Teacher ID, Employment Status, Specialization. A teacher who teaches more than one grade level should have one row per grade; Total Loads is always calculated as Regular + Special, never a column you fill in.",
+    hint: "One row per Teacher + Grade Level. Required columns: Teacher Name, Role/Position, Grade Level, Regular Class Loads, Special Program Loads. Optional Class Shift accepts AM Class, PM Class, or None for Grade 11/12. Special Program Subject is required whenever Special Program Loads is greater than 0. A teacher who teaches more than one grade level should have one row per grade.",
     fileInputId: "teacherImportFile",
     templateFilename: "atlas-teacher-loads-template.csv",
-    templateHeaders: ["Teacher Name","Role/Position","Employee/Teacher ID","Grade Level","Regular Class Loads","Special Program Loads","Special Program Subject","Employment Status","Specialization"],
+    templateHeaders: ["Teacher Name","Role/Position","Employee/Teacher ID","Grade Level","Regular Class Loads","Special Program Loads","Special Program Subject","Class Shift","Employment Status","Specialization"],
     templateSample: [
-      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 7","5","2","ICT","Full-time","Math"],
-      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 8","4","2","Research","Full-time","Math"],
-      ["Maria Santos","SHS Science Teacher","T-2026-021","Grade 11","6","0","","Part-time","Science"]
+      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 7","5","2","ICT","None","Full-time","Math"],
+      ["Juan Dela Cruz","JHS Mathematics Teacher","T-2026-014","Grade 8","4","2","Research","None","Full-time","Math"],
+      ["Maria Santos","SHS Science Teacher","T-2026-021","Grade 11","6","0","","AM Class","Part-time","Science"]
     ],
     requiredColumns: [
       {label:"Teacher Name", keys:["teacher name","full name","name"]},
@@ -6365,7 +6402,7 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       {label:"Regular Class Loads", keys:["regular class loads","regular load(s)","regular loads","regular"]},
       {label:"Special Program Loads", keys:["special program loads","special program load(s)","special"]}
     ],
-    previewColumns: ["Teacher","Grade Level","Regular Loads","Special Program Loads","Special Program Subject","Total"],
+    previewColumns: ["Teacher","Grade Level","Regular Loads","Special Program Loads","Special Program Subject","Class Shift","Total"],
     entityLabel: "teacher(s)",
     errorRowCells: row => [
       row["teacher name"]||row["full name"]||row["name"]||"",
@@ -6373,6 +6410,7 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       row["regular class loads"]!==undefined?row["regular class loads"]:(row["regular"]||""),
       row["special program loads"]!==undefined?row["special program loads"]:(row["special"]||""),
       row["special program subject"]||"",
+      row["class shift"]||row["shift"]||"",
       ""
     ],
     parseRow(row){
@@ -6383,6 +6421,7 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const regRaw = row["regular class loads"]!==undefined ? row["regular class loads"] : (row["regular load(s)"]!==undefined?row["regular load(s)"]:(row["regular loads"]!==undefined?row["regular loads"]:row["regular"]));
       const specRaw = row["special program loads"]!==undefined ? row["special program loads"] : (row["special program load(s)"]!==undefined?row["special program load(s)"]:row["special"]);
       const specialSubject = (row["special program subject"]||row["special program subject(s)"]||"").toString().trim();
+      const shiftRaw = (row["class shift"]||row["shift"]||"None").toString().trim();
 
       if(!name) return {ok:false, error:"Missing Teacher Name."};
       if(!role) return {ok:false, error:"Missing Role/Position."};
@@ -6394,14 +6433,16 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const regular = Number(regRaw), special = Number(specRaw);
       if(regular+special < 1) return {ok:false, error:`Regular Class Loads + Special Program Loads must total at least 1 for ${grade}.`};
       if(special>0 && !specialSubject) return {ok:false, error:`Special Program Subject is required for ${grade} since Special Program Loads is greater than 0.`};
+      const shift = /^(am|am class)$/i.test(shiftRaw) ? "AM" : /^(pm|pm class)$/i.test(shiftRaw) ? "PM" : /^(none|--none--|none class)$/i.test(shiftRaw) ? "None" : null;
+      if(shift===null) return {ok:false, error:`Class Shift must be AM Class, PM Class, or None (got "${shiftRaw}").`};
 
       let status = (row["employment status"]||row["status"]||"Full-time").toString().trim();
       status = /^part-?time$/i.test(status) ? "Part-time" : "Full-time";
       const specializations = splitList(row["specialization"]||row["specializations"]||row["learning area"]);
       return {
         ok:true,
-        record: { name, role, employeeId, status, specializations, grade, regular, special, specialSubject: special>0?specialSubject:"" },
-        display: [name+(employeeId?` (${employeeId})`:""), grade, regular, special, special>0?specialSubject:"—", regular+special]
+        record: { name, role, employeeId, status, specializations, grade, regular, special, specialSubject: special>0?specialSubject:"", shift },
+        display: [name+(employeeId?` (${employeeId})`:""), grade, regular, special, special>0?specialSubject:"—", shift+" Class", regular+special]
       };
     },
     // Groups the per-(teacher,grade) rows above into one entry per distinct
@@ -6413,8 +6454,9 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
       const groups = new Map();
       rawValid.forEach(r=>{
         const key = r.employeeId ? "id::"+r.employeeId.toLowerCase() : "name::"+r.name.toLowerCase()+"::"+r.role.toLowerCase();
-        if(!groups.has(key)) groups.set(key, { name:r.name, role:r.role, employeeId:r.employeeId, status:r.status, specializations:r.specializations, gradeLoads:{} });
+        if(!groups.has(key)) groups.set(key, { name:r.name, role:r.role, employeeId:r.employeeId, status:r.status, specializations:r.specializations, gradeLoads:{}, gradeShifts:{} });
         groups.get(key).gradeLoads[r.grade] = { regular:r.regular, special:r.special, specialSubject:r.specialSubject }; // last row for a repeated grade wins
+        groups.get(key).gradeShifts[r.grade] = r.shift;
       });
       const entries = [];
       groups.forEach(g=>{
@@ -6422,10 +6464,10 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
           ? TEACHERS.find(t=> (t.employeeId||"").toLowerCase()===g.employeeId.toLowerCase())
           : TEACHERS.find(t=> t.name.toLowerCase()===g.name.toLowerCase() && t.role.toLowerCase()===g.role.toLowerCase());
         if(existing){
-          entries.push({ isNew:false, existingId: existing.id, mergedGradeLoads: g.gradeLoads });
+          entries.push({ isNew:false, existingId: existing.id, mergedGradeLoads: g.gradeLoads, mergedGradeShifts: g.gradeShifts });
         } else {
           const tiers = GRADE_ORDER.filter(gr=>gradeLoadTotal(g.gradeLoads[gr])>0);
-          entries.push({ isNew:true, record: { id: makeId(), name:g.name, role:g.role, employeeId:g.employeeId||"", tiers, gradeLoads:g.gradeLoads, gradeShifts:{}, status:g.status, specializations:g.specializations, subjectsCanTeach:[], maxTeachingHours:null, createdBy: currentAdminId() } });
+          entries.push({ isNew:true, record: { id: makeId(), name:g.name, role:g.role, employeeId:g.employeeId||"", tiers, gradeLoads:g.gradeLoads, gradeShifts:g.gradeShifts, status:g.status, specializations:g.specializations, subjectsCanTeach:[], maxTeachingHours:null, createdBy: currentAdminId() } });
         }
       });
       return entries;
@@ -6443,6 +6485,8 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
         if(!t) return;
         t.gradeLoads = t.gradeLoads || {};
         Object.assign(t.gradeLoads, e.mergedGradeLoads);
+        t.gradeShifts = t.gradeShifts || {};
+        Object.assign(t.gradeShifts, e.mergedGradeShifts || {});
         t.tiers = GRADE_ORDER.filter(g=>gradeLoadTotal(t.gradeLoads[g])>0);
       });
       refreshOwnedViews();
@@ -6459,32 +6503,38 @@ document.getElementById("importTeachersBtn").addEventListener("click", ()=>{
 document.getElementById("importSectionsBtn").addEventListener("click", ()=>{
   openBulkImportModal({
     title: "Import Sections from Excel/CSV",
-    hint: "Upload a spreadsheet with one row per section. Required columns: Grade Level, Section Name. Optional: Track (Sr. High only — TechPro, ACADS, or Both), Room/Building (must match an existing room name exactly, or leave blank).",
+    hint: "Upload a spreadsheet with one row per section. Required columns: Grade Level, Section Name. Optional: Adviser, Class Shift (AM Class, PM Class, or None for Grade 11/12), Track, and Room/Building Name.",
     fileInputId: "sectionImportFile",
     templateFilename: "atlas-sections-template.csv",
-    templateHeaders: ["Grade Level","Section Name","Track","Room/Building"],
+    templateHeaders: ["Grade Level","Section Name","Adviser","Class Shift","Track","Room/Building Name"],
     templateSample: [
-      ["Grade 7","Narra","",""],
-      ["Grade 11","STEM-A","TechPro","Room 204"]
+      ["Grade 7","Narra","Juan Dela Cruz","None","","Room 204"],
+      ["Grade 11","STEM-A","Maria Santos","PM Class","TechPro","Room 204"]
     ],
-    previewColumns: ["Grade Level","Section Name","Track","Room/Building"],
+    previewColumns: ["Grade Level","Section Name","Adviser","Class Shift","Track","Room/Building Name"],
     entityLabel: "section(s)",
-    errorRowCells: row => [row["grade level"]||"", row["section name"]||row["section"]||"", row["track"]||"", row["room/building"]||row["room"]||""],
+    errorRowCells: row => [row["grade level"]||"", row["section name"]||row["section"]||"", row["adviser"]||"", row["class shift"]||row["shift"]||"", row["track"]||row["track/strand"]||"", row["room/building name"]||row["room/building"]||row["room"]||""],
     parseRow(row){
       const gradeRaw = (row["grade level"]||row["grade"]||"").toString().trim();
       const name = (row["section name"]||row["section"]||"").toString().trim();
+      const adviserName = (row["adviser"]||row["adviser name"]||"").toString().trim();
+      const shiftRaw = (row["class shift"]||row["shift"]||"None").toString().trim();
       const grade = GRADE_ORDER.find(g=>g.toLowerCase()===gradeRaw.toLowerCase());
       if(!gradeRaw) return {ok:false, error:"Missing Grade Level."};
       if(!grade) return {ok:false, error:`Unrecognized grade level "${gradeRaw}". Use values like "Grade 7".`};
       if(!name) return {ok:false, error:"Missing Section Name."};
+      const adviser = adviserName ? TEACHERS.find(t=>t.name.toLowerCase()===adviserName.toLowerCase()) : null;
+      if(adviserName && !adviser) return {ok:false, error:`Adviser "${adviserName}" was not found in your faculty roster. Add the teacher first or leave Adviser blank.`};
       const isShs = grade==="Grade 11"||grade==="Grade 12";
+      const classShift = /^(am|am class)$/i.test(shiftRaw) ? "AM" : /^(pm|pm class)$/i.test(shiftRaw) ? "PM" : /^(none|--none--|none class)$/i.test(shiftRaw) ? "None" : null;
+      if(classShift===null) return {ok:false, error:`Class Shift must be AM Class, PM Class, or None (got "${shiftRaw}").`};
       let strand = (row["track"]||row["track/strand"]||"").toString().trim();
       if(strand && !isShs) strand = "";
       if(strand && !TRACK_LIST.some(t=>t.toLowerCase()===strand.toLowerCase())){
         return {ok:false, error:`Unrecognized track "${strand}". Use TechPro, ACADS, or Both.`};
       }
       strand = strand ? TRACK_LIST.find(t=>t.toLowerCase()===strand.toLowerCase()) : "";
-      const roomName = (row["room/building"]||row["room"]||"").toString().trim();
+      const roomName = (row["room/building name"]||row["room/building"]||row["room"]||"").toString().trim();
       let roomId = "";
       if(roomName){
         const room = ROOMS.find(r=>r.name.toLowerCase()===roomName.toLowerCase());
@@ -6494,10 +6544,11 @@ document.getElementById("importSectionsBtn").addEventListener("click", ()=>{
       if(SECTIONS.some(s=>s.grade===grade && s.name.toLowerCase()===name.toLowerCase())){
         return {ok:false, error:`A section named "${name}" already exists in ${grade}.`};
       }
-      const sec = { id: makeId(), grade, name, tier:tierOf(grade), subTier:subTierOf(grade), createdBy: currentAdminId() };
+      const sec = { id: makeId(), grade, name, tier:tierOf(grade), subTier:subTierOf(grade), sectionType:"Regular", classShift:isShs ? classShift : "None", createdBy: currentAdminId() };
+      if(adviser) sec.adviserId = adviser.id;
       if(strand) sec.strand = strand;
       if(roomId) sec.roomId = roomId;
-      return { ok:true, record: sec, display:[grade, name, strand||"—", roomName||"—"] };
+      return { ok:true, record: sec, display:[grade, name, adviser ? adviser.name : "—", isShs ? classShift+" Class" : "None", strand||"—", roomName||"—"] };
     },
     async commit(records){
       records.forEach(r=> SECTIONS_ALL.push(r));
@@ -6513,13 +6564,16 @@ document.getElementById("importSubjectsBtn").addEventListener("click", ()=>{
   const f = currentSubjectFilter();
   openBulkImportModal({
     title: "Import Subjects from Excel/CSV",
-    hint: `Upload a spreadsheet with one row per subject. Required columns: Subject Name, Grade Level. Optional: Track/Strand (Sr. High only), Term, School Year, Units, Hours/Week, Subject Type (Core, Specialized, or Elective), Friday Only (Yes/No — excludes the subject from the Mon–Thu rotation so it only appears in Friday's schedule). Rows that leave Term/School Year blank use the currently selected filter (${(termById(f.term)||{}).name||"current term"} — S.Y. ${(schoolYearById(f.sy)||{}).label||"current"}).`,
+    hint: `Upload a spreadsheet with one row per subject. Required columns: Subject Name, Grade Level. Optional: Track/Strand (Grade 11/12 only — use --None--, TechPro, ACADS, or Both (ACADS/TechPro)), Term, School Year, Units, Hours/Week, Subject Type (Core, Specialized, or Elective), Friday Only (Yes/No — excludes the subject from the Mon–Thu rotation so it only appears in Friday's schedule). Rows that leave Term/School Year blank use the currently selected filter (${(termById(f.term)||{}).name||"current term"} — S.Y. ${(schoolYearById(f.sy)||{}).label||"current"}).`,
     fileInputId: "subjectImportFile",
     templateFilename: "atlas-subjects-template.csv",
     templateHeaders: ["Subject Name","Grade Level","Track/Strand","Term","School Year","Units","Hours/Week","Subject Type","Friday Only"],
     templateSample: [
       ["Mathematics","Grade 7","","","","1","4","Core","No"],
-      ["Research 1","Grade 11","TechPro","","","1","2","Specialized","No"]
+      ["Research 1","Grade 11","--None--","","","1","2","Specialized","No"],
+      ["Research 2","Grade 11","TechPro","","","1","2","Specialized","No"],
+      ["Research 3","Grade 12","ACADS","","","1","2","Specialized","No"],
+      ["Research 4","Grade 12","Both (ACADS/TechPro)","","","1","2","Specialized","No"]
     ],
     previewColumns: ["Subject Name","Grade Level","Track/Strand","Term","School Year","Units","Hrs/Wk","Type","Friday Only"],
     entityLabel: "subject(s)",
@@ -6533,9 +6587,12 @@ document.getElementById("importSubjectsBtn").addEventListener("click", ()=>{
       if(!grade) return {ok:false, error:`Unrecognized grade level "${gradeRaw}". Use values like "Grade 7".`};
       const isShs = grade==="Grade 11"||grade==="Grade 12";
       let strand = (row["track/strand"]||row["track"]||"").toString().trim();
+      const normalizedStrand = strand.toLowerCase().replace(/\s+/g," ");
+      if(normalizedStrand==="--none--" || normalizedStrand==="none") strand = "";
+      else if(normalizedStrand==="both (acads/techpro)") strand = "Both";
       if(strand && !isShs) strand = "";
       if(strand && !TRACK_LIST.some(t=>t.toLowerCase()===strand.toLowerCase())){
-        return {ok:false, error:`Unrecognized track "${strand}". Use TechPro, ACADS, or Both.`};
+        return {ok:false, error:`Unrecognized track "${strand}". For Grade 11/12 use --None--, TechPro, ACADS, or Both (ACADS/TechPro).`};
       }
       strand = strand ? TRACK_LIST.find(t=>t.toLowerCase()===strand.toLowerCase()) : "";
       const termRaw = (row["term"]||"").toString().trim();
@@ -6616,7 +6673,7 @@ function scheduleValidationReport(){
   else status = { level:"error", icon:"❌", label:`${hardProblems.length} Conflict${hardProblems.length===1?'':'s'} Found` };
   return { status, hardProblems, openConflicts };
 }
-document.getElementById("validateScheduleBtn").addEventListener("click", ()=>{
+document.getElementById("validateScheduleBtn").addEventListener("click", async ()=>{
   const { status, hardProblems, openConflicts } = scheduleValidationReport();
   const badgeColor = status.level==="ok" ? "green" : status.level==="warn" ? "gold" : "maroon";
   const hardList = hardProblems.slice(0,6).map(p=>`<li>${esc(p)}</li>`).join("") + (hardProblems.length>6 ? `<li>…and ${hardProblems.length-6} more.</li>` : "");
@@ -6627,7 +6684,16 @@ document.getElementById("validateScheduleBtn").addEventListener("click", ()=>{
     ${openConflicts.length ? `<div style="font-weight:700;margin:8px 0 2px;">Other Open Conflicts (Program / Teacher Shift / AM-PM Shift / Teaching Load)</div><ul style="margin:0;padding-left:18px;text-align:left;">${warnList}</ul>` : ''}
     ${!hardProblems.length && !openConflicts.length ? `<div class="hint">Every teacher, section, room, and AM/PM/Program constraint checks out — this schedule is safe to publish or export.</div>` : ''}
   `;
-  if(status.level==="ok"){ showToast("Schedule validated — no teacher, section, room, program, or AM/PM shift conflicts found."); return; }
+  if(status.level==="ok"){
+    FINAL_SCHEDULE_VALIDATED_AT = new Date().toISOString();
+    FINAL_SCHEDULE_VALIDATED_BY = currentUserLabel();
+    await saveData();
+    renderAll();
+    showToast("Schedule validated — Final Classroom Schedule is now available to print.");
+    return;
+  }
+  FINAL_SCHEDULE_VALIDATED_AT = null;
+  FINAL_SCHEDULE_VALIDATED_BY = null;
   openConfirm(body, ()=>{ navigateTo("conflicts"); }, "View Conflicts");
 });
 document.getElementById("genScheduleBtnTeachers").addEventListener("click", runGenerateSchedule);
